@@ -1,0 +1,6 @@
+(test
+ (name       test)
+ (modules    test)
+ (preprocess (pps ppx_sexp_conv))
+ (package    fastws-async)
+ (libraries logs-async-reporter fastws-async alcotest-async))
