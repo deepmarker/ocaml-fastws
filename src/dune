@@ -1,0 +1,11 @@
+(library
+ (name fastws)
+ (public_name fastws)
+ (modules fastws)
+ (libraries astring base64 ocplib-endian httpaf))
+
+(library
+ (name fastws_async)
+ (public_name fastws-async)
+ (modules fastws_async)
+ (libraries fastws async conduit-async))
