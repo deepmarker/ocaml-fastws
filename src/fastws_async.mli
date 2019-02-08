@@ -13,6 +13,7 @@ module type CRYPTO = sig
   type g
   val generate: ?g:g -> int -> buffer
   val sha1 : buffer -> buffer
+  val of_string: string -> buffer
   val to_string: buffer -> string
 end
 
@@ -21,8 +22,7 @@ val client :
   ?initialized:unit Ivar.t ->
   crypto:(module CRYPTO) ->
   Uri.t ->
-  (Frame.t Pipe.Reader.t *
-   Frame.t Pipe.Writer.t) Deferred.Or_error.t
+  (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.Or_error.t
 
 (* val client_ez :
  *   ?opcode:Frame.Opcode.t ->

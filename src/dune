@@ -3,10 +3,17 @@
  (public_name fastws)
  (preprocess (pps ppx_sexp_conv))
  (modules fastws)
- (libraries sexplib astring base64 ocplib-endian httpaf))
+ (libraries sexplib astring base64 ocplib-endian angstrom faraday httpaf))
 
 (library
  (name fastws_async)
  (public_name fastws-async)
  (modules fastws_async)
- (libraries fastws async logs-async conduit-async httpaf-async))
+ (libraries
+  fastws
+  async
+  logs-async
+  conduit-async
+  angstrom-async
+  faraday-async
+  httpaf-async))
