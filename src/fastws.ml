@@ -6,6 +6,8 @@
 open Sexplib.Std
 open Httpaf
 
+let websocket_uuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
 let headers ?protocols nonce =
   Headers.of_list @@
   ("Upgrade", "websocket") ::

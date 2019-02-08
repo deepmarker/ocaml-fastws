@@ -8,17 +8,18 @@ open Httpaf
 
 open Fastws
 
-module type RNG = sig
+module type CRYPTO = sig
   type buffer
   type g
   val generate: ?g:g -> int -> buffer
+  val sha1 : buffer -> buffer
   val to_string: buffer -> string
 end
 
 val client :
   ?extra_headers:Headers.t ->
   ?initialized:unit Ivar.t ->
-  rng:(module RNG) ->
+  crypto:(module CRYPTO) ->
   Uri.t ->
   (Frame.t Pipe.Reader.t *
    Frame.t Pipe.Writer.t) Deferred.Or_error.t

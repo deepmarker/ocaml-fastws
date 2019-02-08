@@ -8,10 +8,14 @@ open Async
 open Httpaf
 open Httpaf_async
 
-module type RNG = sig
+open Fastws
+
+module type CRYPTO = sig
   type buffer
   type g
   val generate: ?g:g -> int -> buffer
+  val sha1 : buffer -> buffer
+  val of_string: string -> buffer
   val to_string: buffer -> string
 end
 
@@ -23,44 +27,65 @@ let merge_headers h1 h2 =
     Headers.add_unless_exists a k v
   end h1
 
-let error_handler _ = ()
-
-let response_handler ({ Response.status ; headers ; _ } as response) _body =
+let response_handler iv nonce crypto
+    ({ Response.version ; status ; headers ; _ } as response) _body =
+  let module Crypto = (val crypto : CRYPTO) in
   Logs.debug ~src
     (fun m -> m "%a" Response.pp_hum response) ;
-  match status with
-  | `Switching_protocols ->
-    (* if Code.(is_error @@ code_of_status status) then
-     *   Reader.contents r >>= fun msg ->
-     *   Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
-     *   failwith @@ "HTTP Error " ^ Code.(string_of_status status)
-     * else if Cohttp.Response.version response <> `HTTP_1_1 then failwith "HTTP version error"
-     * else if status <> `Switching_protocols then failwith @@ "status error " ^ Code.(string_of_status status)
-     * else if Header.(get headers "upgrade") |> Option.map ~f:String.lowercase  <> Some "websocket" then failwith "upgrade error"
-     * else if not @@ upgrade_present headers then failwith "update not present"
-     * else if Header.get headers "sec-websocket-accept" <> Some (nonce ^ websocket_uuid |> b64_encoded_sha1sum) then failwith "accept error"
-     * else Deferred.unit *)
-    ()
-  | #Status.t ->
-    ()
+  let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get headers "upgrade") in
+  let sec_ws_accept_hdr = Headers.get headers "sec-websocket-accept" in
+  let expected_sec =
+    B64.encode (Crypto.(sha1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
+  match version, status, upgrade_hdr, sec_ws_accept_hdr with
+  | { major = 1 ; minor = 1 },
+    `Switching_protocols,
+    Some "websocket",
+    Some v when v = expected_sec ->
+    Ivar.fill_if_empty iv true
+  | _ ->
+    Logs.err ~src
+      (fun m -> m "Invalid response %a" Response.pp_hum response) ;
+    Ivar.fill_if_empty iv false
+
+let error_handler signal e =
+  begin match e with
+  | `Exn e ->
+    Logs.err ~src
+      (fun m -> m "Exception %a" Exn.pp e) ;
+  | `Invalid_response_body_length resp ->
+    Logs.err ~src
+      (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
+  | `Malformed_response msg ->
+    Logs.err ~src
+      (fun m -> m "Malformed response %s" msg)
+  end ;
+  Ivar.fill_if_empty signal false
 
 let client
     ?(extra_headers = Headers.empty)
     ?(initialized=Ivar.create ())
-    ~rng uri =
+    ~crypto uri =
   let open Conduit_async in
-  let module Rng = (val rng : RNG) in
+  let module Crypto = (val crypto : CRYPTO) in
   let run (V2.Inet_sock socket) _ _ =
-    let nonce = Rng.(generate 16 |> to_string) in
+    let nonce = Crypto.(generate 16 |> to_string) in
     let headers =
       merge_headers extra_headers (Fastws.headers nonce) in
     let req = Request.create ~headers `GET (Uri.to_string uri) in
+    let ok = Ivar.create () in
+    let err = Ivar.create () in
+    let error_handler = error_handler err in
+    let response_handler =
+      response_handler ok nonce (module Crypto) in
     Logs_async.debug ~src
       (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
     let _body = Client.request
         ~error_handler ~response_handler socket req in
-    Ivar.fill_if_empty initialized () ;
-    Deferred.unit
+    Deferred.any [Ivar.read ok ; Ivar.read err] >>= function
+    | false -> failwith "Invalid handshake"
+    | true ->
+      Ivar.fill_if_empty initialized () ;
+      Deferred.unit
   in
   V2.with_connection_uri uri run
 

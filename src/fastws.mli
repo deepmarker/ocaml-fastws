@@ -5,6 +5,8 @@
 
 open Httpaf
 
+val websocket_uuid : string
+
 val headers :
   ?protocols:string list  -> string -> Headers.t
 (** [headers ?protocols nonce] are headers for client handshake, where
