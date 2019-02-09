@@ -49,25 +49,32 @@ let response_handler iv nonce crypto
 
 let error_handler signal e =
   begin match e with
-  | `Exn e ->
-    Logs.err ~src
-      (fun m -> m "Exception %a" Exn.pp e) ;
-  | `Invalid_response_body_length resp ->
-    Logs.err ~src
-      (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
-  | `Malformed_response msg ->
-    Logs.err ~src
-      (fun m -> m "Malformed response %s" msg)
+    | `Exn e ->
+      Logs.err ~src
+        (fun m -> m "Exception %a" Exn.pp e) ;
+    | `Invalid_response_body_length resp ->
+      Logs.err ~src
+        (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
+    | `Malformed_response msg ->
+      Logs.err ~src
+        (fun m -> m "Malformed response %s" msg)
   end ;
   Ivar.fill_if_empty signal false
 
-let client
+let connect
     ?(extra_headers = Headers.empty)
-    ?(initialized=Ivar.create ())
     ~crypto uri =
   let open Conduit_async in
   let module Crypto = (val crypto : CRYPTO) in
+  let initialized = Ivar.create () in
+  let rr, ww = Pipe.create () in
   let run (V2.Inet_sock socket) r _ =
+    let stream = Faraday.create 4096 in
+    let writev = Faraday_async.writev_of_fd (Socket.fd socket) in
+    don't_wait_for begin
+      Faraday_async.serialize stream
+        ~writev ~yield:(fun _ -> Scheduler.yield ())
+    end ;
     let nonce = Crypto.(generate 16 |> to_string) in
     let headers =
       merge_headers extra_headers (Fastws.headers nonce) in
@@ -84,96 +91,113 @@ let client
     Deferred.any [Ivar.read ok ; Ivar.read err] >>= function
     | false -> failwith "Invalid handshake"
     | true ->
-      let rr, ww = Pipe.create () in
-      don't_wait_for begin
-        Pipe.transfer rr (Writer.pipe w) ~f:begin fun frame ->
-          Faraday_async.serialize
-        end
+      Ivar.fill initialized ();
+      don't_wait_for @@
+      Pipe.iter rr ~f:begin fun t ->
+        Logs_async.debug ~src (fun m -> m "-> %a" pp t) >>| fun () ->
+        serialize stream t
       end ;
-      Angstrom_async.parse_many parser (Pipe.write ww)
-      end r >>= fun a ->
-      Ivar.fill_if_empty initialized () ;
-      Deferred.unit
+      Angstrom_async.parse_many parser begin fun t ->
+        Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
+        Pipe.write ww t
+      end r >>= function
+      | Error msg -> failwith msg
+      | Ok () -> Deferred.unit
   in
-  V2.with_connection_uri uri run
+  Deferred.any [
+    Monitor.protect
+      (fun () -> V2.with_connection_uri uri run)
+      ~finally:(fun () -> Pipe.close ww ; Deferred.unit) ;
+    Ivar.read initialized
+  ] >>| fun () ->
+  rr, ww
 
-(* let client_ez
- *     ?opcode
- *     ?(name="websocket.client_ez")
- *     ?extra_headers
- *     ?heartbeat
- *     ?random_string
- *     uri
- *     net_to_ws ws_to_net =
- *   let app_to_ws, reactor_write = Pipe.create () in
- *   let to_reactor_write, client_write = Pipe.create () in
- *   let client_read, ws_to_app = Pipe.create () in
- *   let initialized = Ivar.create () in
- *   let initialized_d = Ivar.read initialized in
- *   let last_pong = ref @@ Time_ns.epoch in
- *   let cleanup = lazy begin
- *     Pipe.close ws_to_app ;
- *     Pipe.close_read app_to_ws ;
- *     Pipe.close_read to_reactor_write ;
- *     Pipe.close client_write
- *   end in
- *   let send_ping w span =
- *     let now = Time_ns.now () in
- *     Logs_async.debug ~src (fun m -> m "-> PING") >>= fun () ->
- *     Pipe.write w @@ Frame.create
- *       ~opcode:Frame.Opcode.Ping
- *       ~content:(Time_ns.to_string_fix_proto `Utc now) () >>| fun () ->
- *     let time_since_last_pong = Time_ns.diff now !last_pong in
- *     if !last_pong > Time_ns.epoch
- *     && Time_ns.Span.(time_since_last_pong > span + span) then
- *       Lazy.force cleanup
- *   in
- *   let react w fr =
- *     let open Frame in
- *     Logs_async.debug ~src (fun m -> m "<- %a" Frame.pp fr) >>= fun () ->
- *     match fr.opcode with
- *     | Opcode.Ping ->
- *         Pipe.write w @@ Frame.create ~opcode:Opcode.Pong () >>| fun () ->
- *         None
- *     | Opcode.Close ->
- *         (\* Immediately echo and pass this last message to the user *\)
- *         (if String.length fr.content >= 2 then
- *            Pipe.write w @@ Frame.create ~opcode:Opcode.Close
- *              ~content:(String.sub fr.content ~pos:0 ~len:2) ()
- *          else Pipe.write w @@ Frame.close 1000) >>| fun () ->
- *         Pipe.close w;
- *         None
- *     | Opcode.Pong ->
- *         last_pong := Time_ns.now (); return None
- *     | Opcode.Text | Opcode.Binary ->
- *         return @@ Some fr.content
- *     | _ ->
- *         Pipe.write w @@ Frame.close 1002 >>| fun () -> Pipe.close w; None
- *   in
- *   let client_read = Pipe.filter_map' client_read ~f:(react reactor_write) in
- *   let react () =
- *     initialized_d >>= fun () ->
- *     Pipe.transfer to_reactor_write reactor_write ~f:(fun content ->
- *         Frame.create ?opcode ~content ()) in
- *   (\* Run send_ping every heartbeat when heartbeat is set. *\)
- *   don't_wait_for begin match heartbeat with
- *   | None -> Deferred.unit
- *   | Some span -> initialized_d >>| fun () ->
- *     Clock_ns.run_at_intervals'
- *       ~continue_on_error:false
- *       ~stop:(Pipe.closed reactor_write)
- *       span (fun () -> send_ping reactor_write span)
- *   end ;
- *   don't_wait_for begin
- *     Monitor.protect
- *       ~finally:(fun () -> Lazy.force cleanup ; Deferred.unit)
- *       begin fun () ->
- *         Deferred.any_unit [
- *           (client ~name ?extra_headers ?random_string ~initialized
- *              ~app_to_ws ~ws_to_app ~net_to_ws ~ws_to_net uri |> Deferred.ignore) ;
- *           react () ;
- *           Deferred.all_unit Pipe.[ closed client_read ; closed client_write ; ]
- *         ]
- *       end
- *   end;
- *   client_read, client_write *)
+let with_connection ?extra_headers ~crypto uri ~f =
+  connect ?extra_headers ~crypto uri >>= fun (r, w) ->
+  protect
+    ~f:(fun () -> f r w)
+    ~finally:(fun () -> Pipe.close w ; Pipe.close_read r)
+
+exception Timeout of Int63.t
+
+let connect_ez
+    ?(binary=false)
+    ?extra_headers
+    ?hb_ns
+    ~crypto
+    uri =
+  let rr, ww = Pipe.create () in
+  let cleaned_up = Ivar.create () in
+  let last_pong = ref (Time_stamp_counter.now ()) in
+  let cleanup ?rw () =
+    begin match rw with
+      | None -> ()
+      | Some (r, w) ->
+        Pipe.close_read r ;
+        Pipe.close w
+    end ;
+    Pipe.close ww ;
+    Ivar.fill_if_empty cleaned_up () in
+  Clock_ns.every
+    ~stop:(Ivar.read cleaned_up)
+    (Time_ns.Span.of_int_sec 60)
+    Time_stamp_counter.Calibrator.calibrate ;
+  don't_wait_for begin
+    Monitor.protect
+      ~finally:(fun () -> cleanup () ; Deferred.unit) begin fun () ->
+      connect ?extra_headers ~crypto uri >>= fun (r, w) ->
+      let m = Monitor.current () in
+      begin match hb_ns with
+        | None -> ()
+        | Some span ->
+          let send_ping () =
+            let now = Time_stamp_counter.now () in
+            Pipe.write w ping >>= fun () ->
+            let elapsed = Time_stamp_counter.diff now !last_pong in
+            let elapsed = Time_stamp_counter.Span.to_ns elapsed in
+            if Int63.(elapsed < span + span) then Deferred.unit
+            else begin
+              Logs_async.warn ~src begin fun m ->
+                m "No pong received to ping request after %a ns, closing" Int63.pp elapsed
+              end >>| fun () ->
+              Monitor.send_exn m (Timeout elapsed)
+            end
+          in
+          Clock_ns.run_at_intervals'
+            ~continue_on_error:false
+            ~stop:(Ivar.read cleaned_up)
+            (Time_ns.Span.of_int63_ns span)
+            send_ping
+      end ;
+      let react fr =
+        match fr.opcode with
+        | Opcode.Ping ->
+          Pipe.write w pong >>| fun () -> None
+        | Opcode.Close ->
+          (* Immediately echo and pass this last message to the user *)
+          (if String.length fr.content >= 2 then
+             Pipe.write w @@ Frame.create ~opcode:Opcode.Close
+               ~content:(String.sub fr.content ~pos:0 ~len:2) ()
+           else Pipe.write w @@ Frame.close 1000) >>| fun () ->
+          Pipe.close w;
+          None
+        | Opcode.Pong ->
+          last_pong := Time_stamp_counter.now (); return None
+        | Opcode.Text
+        | Opcode.Binary ->
+          return @@ Some fr.content
+        | _ ->
+          Pipe.write w @@ Frame.close 1002 >>| fun () -> Pipe.close w; None
+      in
+      let client_read = Pipe.filter_map' client_read ~f:(react reactor_write) in
+      let react () =
+        Ivar.read initialized >>= fun () ->
+        Pipe.transfer to_reactor_write reactor_write ~f:(fun content ->
+            Frame.create ?opcode ~content ()) in
+      Deferred.any_unit [
+        react () ;
+        Deferred.all_unit Pipe.[ closed client_read ; closed client_write ; ]
+      ]
+    end
+  end;
+  client_read, client_write

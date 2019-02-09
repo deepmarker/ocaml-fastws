@@ -12,6 +12,23 @@ val headers :
 (** [headers ?protocols nonce] are headers for client handshake, where
     [nonce] is a "raw" nonce string (not Base64-encoded). *)
 
+module Status : sig
+  type t =
+    | NormalClosure
+    | GoingAway
+    | ProtocolError
+    | UnsupportedDataType
+    | InconsistentData
+    | ViolatesPolicy
+    | MessageTooBig
+    | UnsupportedExtension
+    | UnexpectedCondition
+    | Unknown of int
+
+  val of_int : int -> t
+  val to_int : t -> int
+end
+
 module Opcode : sig
   type t =
     | Continuation
@@ -39,13 +56,16 @@ val pp : Format.formatter -> t -> unit
 val show : t -> string
 
 val create :
-  ?opcode:Opcode.t ->
-  ?extension:int ->
-  ?final:bool ->
-  ?content:string ->
-  unit -> t
+  ?extension:int -> ?final:bool -> ?content:string -> Opcode.t -> t
 
-val close : int -> t
+val ping : t
+val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
+
+val pong : t
+val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
+
+val close : ?msg:(Status.t * string) -> unit -> t
+val closef : Status.t -> ('a, Format.formatter, unit, t) format4 -> 'a
 
 val parser : t Angstrom.t
 val serialize : ?mask:string -> Faraday.t -> t -> unit

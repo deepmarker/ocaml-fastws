@@ -3,6 +3,7 @@
    Distributed under the ISC license, see terms at the end of the file.
   ---------------------------------------------------------------------------*)
 
+open Core
 open Async
 open Httpaf
 
@@ -17,17 +18,25 @@ module type CRYPTO = sig
   val to_string: buffer -> string
 end
 
-val client :
+val connect :
   ?extra_headers:Headers.t ->
-  ?initialized:unit Ivar.t ->
   crypto:(module CRYPTO) ->
   Uri.t ->
-  (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.Or_error.t
+  (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
 
-(* val client_ez :
- *   ?opcode:Frame.Opcode.t ->
- *   ?extra_headers:Headers.t ->
- *   ?heartbeat:Time_ns.Span.t ->
- *   rng:(module RNG) ->
- *   Uri.t -> Reader.t -> Writer.t ->
- *   string Pipe.Reader.t * string Pipe.Writer.t *)
+val with_connection :
+  ?extra_headers:Headers.t ->
+  crypto:(module CRYPTO) ->
+  Uri.t ->
+  f:(t Pipe.Reader.t -> t Pipe.Writer.t -> 'a Deferred.t) ->
+  'a Deferred.t
+
+exception Timeout of Int63.t
+
+val connect_ez :
+  ?binary:bool ->
+  ?extra_headers:Headers.t ->
+  ?hb_ns:Int63.t ->
+  crypto:(module CRYPTO) ->
+  Uri.t ->
+  (string Pipe.Reader.t * string Pipe.Writer.t) Deferred.t
