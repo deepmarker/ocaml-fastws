@@ -40,3 +40,12 @@ val connect_ez :
   crypto:(module CRYPTO) ->
   Uri.t ->
   (string Pipe.Reader.t * string Pipe.Writer.t) Deferred.t
+
+val with_connection_ez :
+  ?binary:bool ->
+  ?extra_headers:Headers.t ->
+  ?hb_ns:Int63.t ->
+  crypto:(module CRYPTO) ->
+  Uri.t ->
+  f:(string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
+  'a Deferred.t
