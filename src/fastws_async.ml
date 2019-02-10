@@ -10,15 +10,6 @@ open Httpaf_async
 
 open Fastws
 
-module type CRYPTO = sig
-  type buffer
-  type g
-  val generate: ?g:g -> int -> buffer
-  val sha1 : buffer -> buffer
-  val of_string: string -> buffer
-  val to_string: buffer -> string
-end
-
 let src =
   Logs.Src.create "fastws.async"
 
@@ -35,7 +26,7 @@ let response_handler iv nonce crypto
   let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get headers "upgrade") in
   let sec_ws_accept_hdr = Headers.get headers "sec-websocket-accept" in
   let expected_sec =
-    Base64.encode_exn (Crypto.(sha1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
+    Base64.encode_exn (Crypto.(sha_1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
   match version, status, upgrade_hdr, sec_ws_accept_hdr with
   | { major = 1 ; minor = 1 },
     `Switching_protocols,
@@ -62,8 +53,9 @@ let error_handler signal e =
   Ivar.fill_if_empty signal false
 
 let connect
+    ?(crypto=(module Crypto : CRYPTO))
     ?(extra_headers = Headers.empty)
-    ~crypto uri =
+    uri =
   let open Conduit_async in
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
@@ -112,7 +104,9 @@ let connect
   ] >>| fun () ->
   rr, ww
 
-let with_connection ?extra_headers ~crypto uri ~f =
+let with_connection
+    ?(crypto=(module Crypto : CRYPTO))
+    ?extra_headers uri ~f =
   connect ?extra_headers ~crypto uri >>= fun (r, w) ->
   protect
     ~f:(fun () -> f r w)
@@ -121,10 +115,10 @@ let with_connection ?extra_headers ~crypto uri ~f =
 exception Timeout of Int63.t
 
 let connect_ez
+    ?(crypto=(module Crypto : CRYPTO))
     ?(binary=false)
     ?extra_headers
     ?hb_ns
-    ~crypto
     uri =
   let ws_read, client_write = Pipe.create () in
   let cleaned_up = Ivar.create () in
@@ -233,7 +227,9 @@ let connect_ez
   Ivar.read client_read_iv >>| fun client_read ->
   client_read, client_write
 
-let with_connection_ez ?binary ?extra_headers ?hb_ns ~crypto uri ~f =
+let with_connection_ez
+    ?(crypto=(module Crypto : CRYPTO))
+    ?binary ?extra_headers ?hb_ns uri ~f =
   connect_ez ?binary ?extra_headers ?hb_ns ~crypto uri >>= fun (r, w) ->
   Monitor.protect ~here:[%here]
     ~finally:(fun () -> Pipe.close_read r ; Pipe.close w ; Deferred.unit)

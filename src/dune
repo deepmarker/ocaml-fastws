@@ -2,7 +2,7 @@
  (name fastws)
  (public_name fastws)
  (preprocess (pps ppx_sexp_conv))
- (modules fastws)
+ (modules fastws sha1)
  (libraries sexplib astring base64 ocplib-endian angstrom faraday httpaf))
 
 (library

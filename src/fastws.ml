@@ -7,6 +7,29 @@ open Sexplib.Std
 
 open Httpaf
 
+module type CRYPTO = sig
+  type buffer
+  type g
+  val generate: ?g:g -> int -> buffer
+  val sha_1 : buffer -> buffer
+  val of_string: string -> buffer
+  val to_string: buffer -> string
+end
+
+module Crypto = struct
+  type buffer = string
+  type g = Random.State.t
+
+  let to_string t = t
+  let of_string t = t
+
+  let generate ?(g=Random.get_state ()) len =
+    Bytes.init len (fun _ -> Char.chr (Random.State.bits g land 0xFF)) |>
+    Bytes.unsafe_to_string
+
+  include Sha1
+end
+
 let websocket_uuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 let headers ?protocols nonce =

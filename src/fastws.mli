@@ -5,6 +5,17 @@
 
 open Httpaf
 
+module type CRYPTO = sig
+  type buffer
+  type g
+  val generate: ?g:g -> int -> buffer
+  val sha_1 : buffer -> buffer
+  val of_string: string -> buffer
+  val to_string: buffer -> string
+end
+
+module Crypto : CRYPTO with type buffer = string
+
 val websocket_uuid : string
 
 val headers :
