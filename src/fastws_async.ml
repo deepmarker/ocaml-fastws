@@ -126,7 +126,7 @@ let connect_ez
     ?hb_ns
     ~crypto
     uri =
-  let rr, ww = Pipe.create () in
+  let ws_read, client_write = Pipe.create () in
   let cleaned_up = Ivar.create () in
   let last_pong = ref (Time_stamp_counter.now ()) in
   let cleanup ?rw () =
@@ -136,12 +136,13 @@ let connect_ez
         Pipe.close_read r ;
         Pipe.close w
     end ;
-    Pipe.close ww ;
+    Pipe.close_read ws_read ;
     Ivar.fill_if_empty cleaned_up () in
   Clock_ns.every
     ~stop:(Ivar.read cleaned_up)
     (Time_ns.Span.of_int_sec 60)
     Time_stamp_counter.Calibrator.calibrate ;
+  let client_read_iv = Ivar.create () in
   don't_wait_for begin
     Monitor.protect
       ~finally:(fun () -> cleanup () ; Deferred.unit) begin fun () ->
@@ -169,35 +170,63 @@ let connect_ez
             (Time_ns.Span.of_int63_ns span)
             send_ping
       end ;
-      let react fr =
-        match fr.opcode with
-        | Opcode.Ping ->
-          Pipe.write w pong >>| fun () -> None
-        | Opcode.Close ->
-          (* Immediately echo and pass this last message to the user *)
-          (if String.length fr.content >= 2 then
-             Pipe.write w @@ Frame.create ~opcode:Opcode.Close
-               ~content:(String.sub fr.content ~pos:0 ~len:2) ()
-           else Pipe.write w @@ Frame.close 1000) >>| fun () ->
-          Pipe.close w;
-          None
-        | Opcode.Pong ->
-          last_pong := Time_stamp_counter.now (); return None
-        | Opcode.Text
-        | Opcode.Binary ->
-          return @@ Some fr.content
-        | _ ->
-          Pipe.write w @@ Frame.close 1002 >>| fun () -> Pipe.close w; None
+      let filter =
+        let buf = Buffer.create 13 in
+        let cont = ref false in
+        fun fr ->
+          match fr.opcode with
+          | Opcode.Ping ->
+            Pipe.write w pong >>| fun () ->
+            None
+          | Close ->
+            Pipe.write w fr >>| fun () ->
+            Pipe.close w ;
+            None
+          | Pong ->
+            last_pong := Time_stamp_counter.now (); return None
+          | Continuation when fr.final ->
+            cont := false ;
+            Buffer.add_string buf fr.content ;
+            return (Some (Buffer.contents buf))
+          | Continuation ->
+            Buffer.add_string buf fr.content ;
+            return None
+          | Text
+          | Binary when fr.final ->
+            return (Some fr.content)
+          | Text
+          | Binary when not !cont ->
+            cont := true ;
+            Buffer.clear buf ;
+            Buffer.add_string buf fr.content ;
+            return None
+          | Text
+          | Binary ->
+            let close_msg =
+              close ~msg:begin
+                Status.ProtocolError,
+                "Fragmented message ongoing"
+              end () in
+            Pipe.write w close_msg >>| fun () ->
+            Pipe.close w ;
+            None
+          | _ ->
+            let close_msg =
+              close ~msg:(Status.UnsupportedExtension, "") () in
+            Pipe.write w close_msg >>| fun () ->
+            Pipe.close w ;
+            None
       in
-      let client_read = Pipe.filter_map' client_read ~f:(react reactor_write) in
+      let client_read = Pipe.filter_map' r ~f:filter in
+      Ivar.fill client_read_iv client_read ;
       let react () =
-        Ivar.read initialized >>= fun () ->
-        Pipe.transfer to_reactor_write reactor_write ~f:(fun content ->
-            Frame.create ?opcode ~content ()) in
+        let opcode = if binary then Opcode.Binary else Text in
+        Pipe.transfer ws_read w ~f:(fun content -> create ~content opcode) in
       Deferred.any_unit [
         react () ;
-        Deferred.all_unit Pipe.[ closed client_read ; closed client_write ; ]
+        Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
       ]
     end
   end;
+  Ivar.read client_read_iv >>| fun client_read ->
   client_read, client_write
