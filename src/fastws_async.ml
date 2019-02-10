@@ -35,7 +35,7 @@ let response_handler iv nonce crypto
   let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get headers "upgrade") in
   let sec_ws_accept_hdr = Headers.get headers "sec-websocket-accept" in
   let expected_sec =
-    B64.encode (Crypto.(sha1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
+    Base64.encode_exn (Crypto.(sha1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
   match version, status, upgrade_hdr, sec_ws_accept_hdr with
   | { major = 1 ; minor = 1 },
     `Switching_protocols,
@@ -68,7 +68,7 @@ let connect
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
   let rr, ww = Pipe.create () in
-  let run (V2.Inet_sock socket) r _ =
+  let run (V3.Inet_sock socket) r _ =
     let stream = Faraday.create 4096 in
     let writev = Faraday_async.writev_of_fd (Socket.fd socket) in
     don't_wait_for begin
@@ -106,7 +106,7 @@ let connect
   in
   Deferred.any [
     Monitor.protect ~here:[%here]
-      (fun () -> V2.with_connection_uri uri run)
+      (fun () -> V3.with_connection_uri uri run)
       ~finally:(fun () -> Pipe.close ww ; Deferred.unit) ;
     Ivar.read initialized
   ] >>| fun () ->

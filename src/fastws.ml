@@ -13,7 +13,7 @@ let headers ?protocols nonce =
   Headers.of_list @@
   ("Upgrade", "websocket") ::
   ("Connection", "Upgrade") ::
-  ("Sec-WebSocket-Key", B64.encode nonce) ::
+  ("Sec-WebSocket-Key", Base64.encode_exn nonce) ::
   match protocols with
   | None -> ["Sec-WebSocket-Version", "13"]
   | Some ps ->
