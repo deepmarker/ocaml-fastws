@@ -36,7 +36,7 @@ let headers ?protocols nonce =
   Headers.of_list @@
   ("Upgrade", "websocket") ::
   ("Connection", "Upgrade") ::
-  ("Sec-WebSocket-Key", Base64.encode_exn nonce) ::
+  ("Sec-WebSocket-Key", nonce) ::
   match protocols with
   | None -> ["Sec-WebSocket-Version", "13"]
   | Some ps ->
@@ -181,68 +181,93 @@ let get_extension c = (Char.code c lsr 4) land 0x7
 let get_len c = Char.code c land 0x7f
 let get_opcode c = Opcode.of_int (Char.code c land 0xf)
 
-let xor_char a b =
-  Char.(chr (code a lxor code b))
+let xormask ~mask buf =
+  let xor_char a b =
+    Char.(chr (code a lxor code b)) in
+  Bytes.iteri begin fun i c ->
+    Bytes.set buf i (xor_char c (String.get mask (i mod 4)))
+  end buf
+
+let empty_parser =
+  let open Angstrom in
+  let complete_frame = ref (create Opcode.Text) in
+  lift (fun _ -> !complete_frame) @@
+  (* skip (fun _ -> true) *)
+  any_char
+  (* scan_state (start, !complete_frame) (fun _ _ -> None) *)
 
 let parser =
   let open Angstrom in
-  lift snd @@
-  scan_state (start, create Opcode.Text) begin fun (state, frame) c ->
+  let complete_frame = ref (create Opcode.Text) in
+  lift (fun _ -> !complete_frame) @@
+  scan_state (start, !complete_frame) begin fun (state, frame) c ->
     match state.pos with
     | Hdr1 ->
+      Logs.debug (fun m -> m "HDR1") ;
       let final = get_finmask c in
       let extension = get_extension c in
       let opcode = get_opcode c in
       Some ({ start with pos = Hdr2 },
             create ~extension ~final opcode)
     | Hdr2 ->
+      Logs.debug (fun m -> m "HDR2") ;
       let state =
         if get_finmask c then
           { state with mask = Some (Bytes.create 4) }
         else state in
       begin
         match get_len c with
-        | 126 -> Some ({ state with pos = Len 2 }, frame)
-        | 127 -> Some ({ state with pos = Len 8 }, frame)
+        | 126 -> Some ({ state with pos = Len 1 }, frame)
+        | 127 -> Some ({ state with pos = Len 7 }, frame)
         | n when state.mask = None ->
           let len = Int64.of_int n in
-          Some ({ state with pos = Data len ; len }, frame)
+          Some ({ state with pos = Data (Int64.of_int (pred n)) ; len }, frame)
         | n ->
           let len = Int64.of_int n in
-          Some ({ state with pos = Mask 4 ; len }, frame)
+          Some ({ state with pos = Mask 3 ; len }, frame)
       end
     | Len 0 -> begin
+        Logs.debug (fun m -> m "LEN0") ;
+        let len = Int64.(add state.len (of_int (Char.code c))) in
         match state.mask with
-        | Some _ -> Some ({ state with pos = Mask 4 }, frame)
-        | None -> Some ({ state with pos = Data state.len }, frame)
+        | Some _ -> Some ({ state with pos = Mask 3 ; len }, frame)
+        | None -> Some ({ state with pos = Data state.len ; len }, frame)
       end
     | Len n ->
-      let open Int64 in
-      let len = add state.len
-          (shift_left (of_int (Char.code c)) (n - 1)) in
-      Some ({ state with pos = Len (n - 1) ; len }, frame)
-    | Mask 0 -> Some ({ state with pos = Data state.len }, frame)
-    | Mask n -> begin
+      Logs.debug (fun m -> m "LEN %d" n) ;
+      let len =
+        Int64.(add state.len (shift_left (of_int (Char.code c)) n)) in
+      Some ({ state with pos = Len (pred n) ; len }, frame)
+    | Mask 0 -> begin
+        Logs.debug (fun m -> m "MASK0") ;
         match state.mask with
         | None -> assert false
         | Some buf ->
-          Bytes.set buf (n - 4) c ;
+          Bytes.set buf 3 c ;
+          Some ({ state with pos = Data state.len }, frame)
+      end
+    | Mask n -> begin
+        Logs.debug (fun m -> m "MASK %d" n) ;
+        match state.mask with
+        | None -> assert false
+        | Some buf ->
+          Bytes.set buf (3 - n) c ;
           Some ({ state with pos = Mask (pred n) }, frame)
       end
     | Data 0L ->
+      Logs.debug (fun m -> m "Data0") ;
       let content = begin
         match state.mask with
         | None -> Buffer.contents state.buf
         | Some mask ->
           let buf = Buffer.to_bytes state.buf in
-          let open Bytes in
-          iteri begin fun i c ->
-            set buf i (xor_char c (get mask (i mod 4)))
-          end buf ;
-          unsafe_to_string buf
+          xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
+          Bytes.unsafe_to_string buf
       end in
-      Some (state, { frame with content })
+      complete_frame := { frame with content } ;
+      None
     | Data n ->
+      Logs.debug (fun m -> m "Data %Ld" n) ;
       Buffer.add_char state.buf c ;
       Some ({ state with pos = Data (Int64.pred n) }, frame)
   end
@@ -255,12 +280,16 @@ let serialize ?mask t { opcode ; extension ; final ; content } =
   let len' =
     if len < 126 then len else if len < 1 lsl 16 then 126 else 127 in
   write_uint8 t (match mask with None -> len' | Some _ -> 0x80 lor len') ;
-  if len' = 126 then BE.write_uint16 t len
-  else if len' = 127 then BE.write_uint64 t (Int64.of_int len) ;
   begin
-    match mask with
-    | None -> ()
-    | Some m -> write_string t m
+    if len' = 126 then BE.write_uint16 t len
+    else if len' = 127 then BE.write_uint64 t (Int64.of_int len)
   end ;
-  write_string t content
+  match mask with
+  | None ->
+    write_string t content
+  | Some mask ->
+    write_string t mask ;
+    let content = Bytes.unsafe_of_string content in
+    xormask ~mask content ;
+    write_bytes t content
 

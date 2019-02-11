@@ -59,50 +59,71 @@ let connect
   let open Conduit_async in
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
-  let rr, ww = Pipe.create () in
+  let client_r, ws_w = Pipe.create () in
+  let ws_r, client_w = Pipe.create () in
+  let stream = Faraday.create 4096 in
   let run (V3.Inet_sock socket) r _ =
-    let stream = Faraday.create 4096 in
     let writev = Faraday_async.writev_of_fd (Socket.fd socket) in
-    don't_wait_for begin
-      Faraday_async.serialize stream
-        ~writev ~yield:(fun _ -> Scheduler.yield ())
-    end ;
-    let nonce = Crypto.(generate 16 |> to_string) in
+    let rec flush () =
+      match Faraday.operation stream with
+      | `Close -> raise Exit
+      | `Yield -> Deferred.unit
+      | `Writev iovecs ->
+        writev iovecs >>= function
+        | `Closed -> raise Exit
+        | `Ok n ->
+          Faraday.shift stream n ;
+          flush ()
+    in
+    let nonce =
+      Base64.encode_exn Crypto.(generate 16 |> to_string) in
     let headers =
       merge_headers extra_headers (Fastws.headers nonce) in
     let req = Request.create ~headers `GET (Uri.to_string uri) in
     let ok = Ivar.create () in
-    let err = Ivar.create () in
-    let error_handler = error_handler err in
+    let error_handler = error_handler ok in
     let response_handler =
       response_handler ok nonce (module Crypto) in
     Logs_async.debug ~src
       (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
     let _body = Client.request
         ~error_handler ~response_handler socket req in
-    Deferred.any [Ivar.read ok ; Ivar.read err] >>= function
+    Ivar.read ok >>= function
     | false -> failwith "Invalid handshake"
     | true ->
-      Ivar.fill initialized ();
-      don't_wait_for @@
-      Pipe.iter rr ~f:begin fun t ->
-        Logs_async.debug ~src (fun m -> m "-> %a" pp t) >>| fun () ->
-        serialize stream t
+      Ivar.fill initialized () ;
+      Logs_async.debug ~src
+        (fun m -> m "Connected to %a" Uri.pp_hum uri) >>= fun () ->
+      don't_wait_for begin
+        Pipe.iter ws_r ~f:begin fun t ->
+          let mask = Crypto.(to_string (generate 4)) in
+          serialize ~mask stream t ;
+          flush () >>= fun () ->
+          Logs_async.debug ~src (fun m -> m "-> %a" pp t)
+        end
       end ;
-      Angstrom_async.parse_many parser begin fun t ->
+      (* ignore r ;
+       * ignore ws_w ;
+       * Deferred.never () *)
+      Angstrom_async.parse_many empty_parser begin fun t ->
         Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-        Pipe.write ww t
+        Pipe.write ws_w t
       end r >>= function
-      | Error msg -> failwith msg
-      | Ok () -> Deferred.unit
+      | Error msg ->
+        Logs_async.debug ~src (fun m -> m "%s" msg) >>= fun () ->
+        failwith msg
+      | Ok () ->
+        Logs_async.debug
+          ~src (fun m -> m "Websocket terminating") >>= fun () ->
+        Deferred.unit
   in
-  Deferred.any [
+  don't_wait_for begin
     Monitor.protect ~here:[%here]
       (fun () -> V3.with_connection_uri uri run)
-      ~finally:(fun () -> Pipe.close ww ; Deferred.unit) ;
-    Ivar.read initialized
-  ] >>| fun () ->
-  rr, ww
+      ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
+  end ;
+  Ivar.read initialized >>| fun () ->
+  client_r, client_w
 
 let with_connection
     ?(crypto=(module Crypto : CRYPTO))
@@ -154,7 +175,8 @@ let connect_ez
                 if Int63.(elapsed < span + span) then Deferred.unit
                 else begin
                   Logs_async.warn ~src begin fun m ->
-                    m "No pong received to ping request after %a ns, closing" Int63.pp elapsed
+                    m "No pong received to ping request after %a ns, closing"
+                      Int63.pp elapsed
                   end >>| fun () ->
                   Monitor.send_exn m (Timeout elapsed)
                 end
