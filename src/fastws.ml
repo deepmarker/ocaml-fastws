@@ -187,9 +187,10 @@ let get_rsv c = (Char.code c lsr 4) land 0x7
 let get_len c = Char.code c land 0x7f
 let get_opcode c = Opcode.of_int (Char.code c land 0xf)
 
+let xor_char a b =
+  Char.(chr (code a lxor code b))
+
 let xormask ~mask buf =
-  let xor_char a b =
-    Char.(chr (code a lxor code b)) in
   Bytes.iteri begin fun i c ->
     Bytes.set buf i (xor_char c (String.get mask (i mod 4)))
   end buf
@@ -200,45 +201,45 @@ let parser =
     (init, create Opcode.Continuation) begin fun (state, frame) c ->
     match state.pos with
     | Hdr1 ->
-      Logs.debug (fun m -> m "HDR1 %C" c) ;
       let final = get_finmask c in
       let rsv = get_rsv c in
       let opcode = get_opcode c in
       Some ({ state with pos = Hdr2 },
             create ~rsv ~final opcode)
     | Hdr2 ->
-      Logs.debug (fun m -> m "HDR2 %C" c) ;
       begin
-        match get_len c with
-        | 126 -> Some ({ state with pos = Len 1 }, frame)
-        | 127 -> Some ({ state with pos = Len 7 }, frame)
-        | n when not (get_finmask c) -> begin
+        match get_len c, get_finmask c with
+        | 126, false -> Some ({ state with pos = Len 1 }, frame)
+        | 127, false -> Some ({ state with pos = Len 7 }, frame)
+        | 126, true -> Some ({ state with pos = Len 1 ;
+                                          mask = Some (Bytes.create 4)}, frame)
+        | 127, true -> Some ({ state with pos = Len 7 ;
+                                          mask = Some (Bytes.create 4)}, frame)
+        | n, false -> begin
             match Int64.of_int n with
             | 0L -> None
             | len ->
               Some ({ state with
                       pos = Data (Int64.pred len) ; len }, frame)
           end
-        | n ->
+        | n, true ->
           Some ({ state with
                   pos = Mask 3 ;
                   mask = Some (Bytes.create 4) ;
                   len = Int64.of_int n }, frame)
       end
     | Len 0 -> begin
-        Logs.debug (fun m -> m "LEN0") ;
-        let len = Int64.(add state.len (of_int (Char.code c))) in
+        let len = Int64.(logor state.len (of_int (Char.code c))) in
         match state.mask with
         | Some _ -> Some ({ state with pos = Mask 3 ; len }, frame)
-        | None -> Some ({ state with pos = Data (Int64.pred len) ; len }, frame)
+        | None ->
+          Some ({ state with pos = Data (Int64.pred len) ; len }, frame)
       end
     | Len n ->
-      Logs.debug (fun m -> m "LEN %d" n) ;
       let len =
-        Int64.(add state.len (shift_left (of_int (Char.code c)) n)) in
+        Int64.(logor state.len (shift_left (of_int (Char.code c)) (8*n))) in
       Some ({ state with pos = Len (pred n) ; len }, frame)
     | Mask n -> begin
-        Logs.debug (fun m -> m "MASK %d" n) ;
         match state.mask with
         | None -> assert false
         | Some buf ->
@@ -252,11 +253,9 @@ let parser =
           end
       end
     | Data 0L ->
-      Logs.debug (fun m -> m "Data0") ;
       Buffer.add_char state.buf c ;
       None
     | Data n ->
-      Logs.debug (fun m -> m "Data %Ld" n) ;
       Buffer.add_char state.buf c ;
       Some ({ state with pos = Data (Int64.pred n) }, frame)
   end |>
@@ -276,8 +275,8 @@ let parser =
 let serialize ?mask t { opcode ; rsv ; final ; content } =
   let open Faraday in
   let b1 = Opcode.to_int opcode lor (rsv lsl 4) in
-  let len = String.length content in
   write_uint8 t (if final then 0x80 lor b1 else b1) ;
+  let len = String.length content in
   let len' =
     if len < 126 then len else if len < 1 lsl 16 then 126 else 127 in
   write_uint8 t (match mask with None -> len' | Some _ -> 0x80 lor len') ;
@@ -290,7 +289,7 @@ let serialize ?mask t { opcode ; rsv ; final ; content } =
     write_string t content
   | Some mask ->
     write_string t mask ;
-    let content = Bytes.unsafe_of_string content in
-    xormask ~mask content ;
-    write_bytes t content
+    String.iteri begin fun i c ->
+      write_char t (xor_char c (String.get mask (i mod 4)))
+    end content
 

@@ -20,19 +20,25 @@ let frames = [
   "unfinished cont", create ~final:false Opcode.Continuation ;
   "text with rsv", create ~final:false ~rsv:7 Opcode.Text ;
   "empty binary", create ~final:false Opcode.Binary ;
-  "long binary", create ~content:(Crypto.generate 126) Opcode.Binary ;
-  (* "very long binary", create ~content:(Crypto.generate (1 lsl 16)) Opcode.Binary ; *)
+  "text 125", create ~content:(Crypto.generate 125) Opcode.Text ;
+  "binary 125", create ~content:(Crypto.generate 125) Opcode.Binary ;
+  "text 126", create ~content:(Crypto.generate 126) Opcode.Text ;
+  "binary 126", create ~content:(Crypto.generate 126) Opcode.Binary ;
+  "binary 65536", create ~content:(Crypto.generate (1 lsl 16)) Opcode.Binary ;
 ]
 
 let frame = testable pp equal
 
 let roundtrip ?mask descr fr () =
-  let pp = Faraday.create 128 in
+  let pp = Faraday.create 256 in
   serialize ?mask pp fr ;
   let buf = Faraday.serialize_to_bigstring pp in
   match Angstrom.parse_bigstring parser buf with
   | Error msg -> fail msg
-  | Ok fr'-> check frame descr fr fr'
+  | Ok fr'->
+    check int (descr ^ ".length")
+      (String.length fr.content) (String.length fr'.content) ;
+    check frame descr fr fr'
 
 let connect () =
   let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" () in
