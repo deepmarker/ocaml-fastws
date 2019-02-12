@@ -1,9 +1,38 @@
 open Async
-open Alcotest_async
+open Alcotest
+(* open Alcotest_async *)
+open Fastws
 
 let () =
   Logs.set_level (Some Debug) ;
   Logs.set_reporter (Logs_async_reporter.reporter ())
+
+let parse =
+  Angstrom.parse_string Fastws.parser
+
+let frames = [
+  "empty text"        , create Opcode.Text ;
+  "text with content" , create ~content:"test" Opcode.Text ;
+  "empty continution" , create Opcode.Continuation ;
+  "ping", create Opcode.Ping ;
+  "pong", create Opcode.Pong ;
+  "close", close ~msg:(Status.NormalClosure, "bleh") () ;
+  "unfinished cont", create ~final:false Opcode.Continuation ;
+  "text with rsv", create ~final:false ~rsv:7 Opcode.Text ;
+  "empty binary", create ~final:false Opcode.Binary ;
+  "long binary", create ~content:(Crypto.generate 126) Opcode.Binary ;
+  (* "very long binary", create ~content:(Crypto.generate (1 lsl 16)) Opcode.Binary ; *)
+]
+
+let frame = testable pp equal
+
+let roundtrip ?mask descr fr () =
+  let pp = Faraday.create 128 in
+  serialize ?mask pp fr ;
+  let buf = Faraday.serialize_to_bigstring pp in
+  match Angstrom.parse_bigstring parser buf with
+  | Error msg -> fail msg
+  | Ok fr'-> check frame descr fr fr'
 
 let connect () =
   let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" () in
@@ -26,13 +55,23 @@ let with_connection_ez () =
     | `Ok _ -> failwith "message has been altered"
   end
 
-let basic = [
-  test_case "connect" `Quick connect ;
+let roundtrip_unmasked =
+  List.map (fun (n, f) -> n, `Quick, roundtrip n f) frames
+
+let roundtrip_masked =
+  List.map begin fun (n, f) ->
+    n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
+  end frames
+
+let async = [
+  (* test_case "connect" `Quick connect ; *)
   (* test_case "with_connection_ez" `Quick with_connection_ez ; *)
 ]
 
 let () =
   Alcotest.run "fastws" [
-    "basic", basic ;
+    "roundtrip", roundtrip_unmasked ;
+    "roundtrip_masked", roundtrip_masked ;
+    "async", async ;
   ]
 

@@ -52,22 +52,28 @@ module Opcode : sig
     | Nonctrl of int
   [@@deriving sexp]
 
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+
   val to_int : t -> int
   val pp : Format.formatter -> t -> unit
 end
 
 type t = {
   opcode: Opcode.t ;
-  extension: int ;
+  rsv: int ;
   final: bool ;
   content: string ;
 } [@@deriving sexp]
+
+val compare : t -> t -> int
+val equal : t -> t -> bool
 
 val pp : Format.formatter -> t -> unit
 val show : t -> string
 
 val create :
-  ?extension:int -> ?final:bool -> ?content:string -> Opcode.t -> t
+  ?rsv:int -> ?final:bool -> ?content:string -> Opcode.t -> t
 
 val ping : t
 val pingf : ('a, Format.formatter, unit, t) format4 -> 'a

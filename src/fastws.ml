@@ -93,6 +93,9 @@ module Opcode = struct
     | Nonctrl of int
   [@@deriving sexp]
 
+  let compare = Pervasives.compare
+  let equal = Pervasives.(=)
+
   let pp ppf t =
     Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t t)
 
@@ -120,18 +123,21 @@ end
 
 type t = {
   opcode : Opcode.t ;
-  extension : int ;
+  rsv : int ;
   final : bool ;
   content: string ;
 } [@@deriving sexp]
+
+let compare = Pervasives.compare
+let equal = Pervasives.(=)
 
 let pp ppf t =
   Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t t)
 
 let show t = Format.asprintf "%a" pp t
 
-let create ?(extension=0) ?(final=true) ?(content="") opcode =
-  { opcode ; extension ; final ; content }
+let create ?(rsv=0) ?(final=true) ?(content="") opcode =
+  { opcode ; rsv ; final ; content }
 
 let ping = create Opcode.Ping
 let pong = create Opcode.Pong
@@ -169,7 +175,7 @@ type state = {
   len : int64 ;
 }
 
-let create_state () = {
+let init = {
   pos = Hdr1 ;
   buf = Buffer.create 13 ;
   mask = None ;
@@ -177,7 +183,7 @@ let create_state () = {
 }
 
 let get_finmask c = Char.code c land 0x80 <> 0
-let get_extension c = (Char.code c lsr 4) land 0x7
+let get_rsv c = (Char.code c lsr 4) land 0x7
 let get_len c = Char.code c land 0x7f
 let get_opcode c = Opcode.of_int (Char.code c land 0xf)
 
@@ -191,31 +197,33 @@ let xormask ~mask buf =
 let parser =
   let open Angstrom in
   scan_state
-    (create_state (), create Opcode.Continuation) begin fun (state, frame) c ->
+    (init, create Opcode.Continuation) begin fun (state, frame) c ->
     match state.pos with
     | Hdr1 ->
       Logs.debug (fun m -> m "HDR1 %C" c) ;
       let final = get_finmask c in
-      let extension = get_extension c in
+      let rsv = get_rsv c in
       let opcode = get_opcode c in
       Some ({ state with pos = Hdr2 },
-            create ~extension ~final opcode)
+            create ~rsv ~final opcode)
     | Hdr2 ->
       Logs.debug (fun m -> m "HDR2 %C" c) ;
-      let state =
-        if get_finmask c then
-          { state with mask = Some (Bytes.create 4) }
-        else state in
       begin
         match get_len c with
         | 126 -> Some ({ state with pos = Len 1 }, frame)
         | 127 -> Some ({ state with pos = Len 7 }, frame)
-        | n when state.mask = None ->
-          let len = Int64.of_int n in
-          Some ({ state with pos = Data (Int64.pred len) ; len }, frame)
+        | n when not (get_finmask c) -> begin
+            match Int64.of_int n with
+            | 0L -> None
+            | len ->
+              Some ({ state with
+                      pos = Data (Int64.pred len) ; len }, frame)
+          end
         | n ->
-          let len = Int64.of_int n in
-          Some ({ state with pos = Mask 3 ; len }, frame)
+          Some ({ state with
+                  pos = Mask 3 ;
+                  mask = Some (Bytes.create 4) ;
+                  len = Int64.of_int n }, frame)
       end
     | Len 0 -> begin
         Logs.debug (fun m -> m "LEN0") ;
@@ -229,21 +237,19 @@ let parser =
       let len =
         Int64.(add state.len (shift_left (of_int (Char.code c)) n)) in
       Some ({ state with pos = Len (pred n) ; len }, frame)
-    | Mask 0 -> begin
-        Logs.debug (fun m -> m "MASK0") ;
-        match state.mask with
-        | None -> assert false
-        | Some buf ->
-          Bytes.set buf 3 c ;
-          Some ({ state with pos = Data state.len }, frame)
-      end
     | Mask n -> begin
         Logs.debug (fun m -> m "MASK %d" n) ;
         match state.mask with
         | None -> assert false
         | Some buf ->
           Bytes.set buf (3 - n) c ;
-          Some ({ state with pos = Mask (pred n) }, frame)
+          begin match n, state.len = 0L with
+            | 0, true -> None
+            | 0, false ->
+              Some ({ state with pos = Data (Int64.pred state.len) }, frame)
+            | _ ->
+              Some ({ state with pos = Mask (pred n) }, frame)
+          end
       end
     | Data 0L ->
       Logs.debug (fun m -> m "Data0") ;
@@ -255,19 +261,21 @@ let parser =
       Some ({ state with pos = Data (Int64.pred n) }, frame)
   end |>
   lift begin fun (st, t) ->
-    match st.mask with
-    | None ->
-      { t with content = Buffer.contents st.buf }
-    | Some mask ->
-      let buf = Buffer.to_bytes st.buf in
-      xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
-      { t with content = Bytes.unsafe_to_string buf }
+    let ret =
+      match st.mask with
+      | None ->
+        { t with content = Buffer.contents st.buf }
+      | Some mask ->
+        let buf = Buffer.to_bytes st.buf in
+        xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
+        { t with content = Bytes.unsafe_to_string buf } in
+    Buffer.clear st.buf ;
+    ret
   end
 
-
-let serialize ?mask t { opcode ; extension ; final ; content } =
+let serialize ?mask t { opcode ; rsv ; final ; content } =
   let open Faraday in
-  let b1 = Opcode.to_int opcode lor (extension lsl 4) in
+  let b1 = Opcode.to_int opcode lor (rsv lsl 4) in
   let len = String.length content in
   write_uint8 t (if final then 0x80 lor b1 else b1) ;
   let len' =
