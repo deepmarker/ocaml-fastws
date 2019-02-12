@@ -15,6 +15,7 @@ let frames = [
   "empty continution" , create Opcode.Continuation ;
   "ping", create Opcode.Ping ;
   "pong", create Opcode.Pong ;
+  "empty close", close () ;
   "close", close ~msg:(Status.NormalClosure, "bleh") () ;
   "unfinished cont", create ~final:false Opcode.Continuation ;
   "text with rsv", create ~final:false ~rsv:7 Opcode.Text ;
@@ -26,27 +27,62 @@ let frames = [
   "binary 65536", create ~content:(Crypto.generate (1 lsl 16)) Opcode.Binary ;
 ]
 
+let multiframes = [
+  "double text", [create Opcode.Text ; create Opcode.Text] ;
+  "text close", [create Opcode.Text ; create Opcode.Close] ;
+  "close text", [create Opcode.Close ; create Opcode.Text] ;
+  "double close", [create Opcode.Close ; create Opcode.Close] ;
+]
+
 let frame = testable pp equal
 
-let roundtrip ?mask descr fr () =
+let roundtrip ?mask descr frames () =
   let pp = Faraday.create 256 in
-  serialize ?mask pp fr ;
+  List.iter (serialize ?mask pp) frames ;
   let buf = Faraday.serialize_to_bigstring pp in
-  match Angstrom.parse_bigstring parser buf with
-  | Error msg -> fail msg
-  | Ok fr'->
-    check int (descr ^ ".length")
-      (String.length fr.content) (String.length fr'.content) ;
-    check frame descr fr fr'
+  let len = Bigstringaf.length buf in
+  Format.eprintf "buffer is %d bytes long@." len ;
+  let frames' =
+    let rec inner off len frames =
+      if off = len then List.rev frames else
+        match Angstrom.Unbuffered.parse parser with
+        | Partial { continue ; committed } -> begin
+            check int "commited" 0 committed ;
+            match continue buf ~off ~len Complete with
+            | Done (0, _) ->
+              failwith "consumed zero"
+            | Done (consumed, v) ->
+              Format.eprintf "%a (consumed %d) @." Fastws.pp v consumed ;
+              inner (off + consumed) (len - consumed) (v :: frames)
+            | Fail _ -> failwith "got fail"
+            | Partial _ -> failwith "got re partial"
+          end
+        | Done _
+        | _ -> invalid_arg "parser must be partial" in
+    inner 0 len []
+  in
+  List.iter (fun fr -> Logs.debug (fun m -> m "%a" Fastws.pp fr)) frames' ;
+  check int "roundtrip list size" (List.length frames) (List.length frames') ;
+  List.iter2 (check frame descr) frames frames'
 
 let connect () =
   let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" () in
-  let frame = Fastws.create ~content:"msg" Text in
+  let frame = create ~content:"msg" Text in
   Fastws_async.connect url >>= begin fun (r, w) ->
     Pipe.write w frame >>= fun () ->
     Pipe.read r >>= function
     | `Eof -> failwith "did not receive echo"
-    | `Ok fr when fr = frame -> Deferred.unit
+    | `Ok fr when fr = frame -> begin
+        (* let close_fr = close () in
+         * Pipe.write w close_fr >>= fun () ->
+         * Pipe.read r >>= function
+         * | `Eof -> failwith "did not receive close echo"
+         * | `Ok fr when fr = close_fr ->
+         *   Pipe.close w ;
+         *   Pipe.close_read r ; *)
+          Deferred.unit
+        (* | _ -> failwith "close frame has been altered" *)
+      end
     | `Ok _ -> failwith "message has been altered"
   end
 
@@ -61,12 +97,24 @@ let with_connection_ez () =
   end
 
 let roundtrip_unmasked =
-  List.map (fun (n, f) -> n, `Quick, roundtrip n f) frames
+  List.map
+    (fun (n, f) -> n, `Quick, roundtrip n f)
+    (List.map (fun (s, f) -> s, [f]) frames)
 
 let roundtrip_masked =
   List.map begin fun (n, f) ->
     n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
-  end frames
+  end
+    (List.map (fun (s, f) -> s, [f]) frames)
+
+let roundtrip_unmasked_multi =
+  List.map
+    (fun (n, f) -> n, `Quick, roundtrip n f) multiframes
+
+let roundtrip_masked_multi =
+  List.map begin fun (n, f) ->
+    n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
+  end multiframes
 
 let async = Alcotest_async.[
   test_case "connect" `Quick connect ;
@@ -77,6 +125,8 @@ let () =
   Alcotest.run "fastws" [
     "roundtrip", roundtrip_unmasked ;
     "roundtrip_masked", roundtrip_masked ;
+    "roundtrip_multi", roundtrip_unmasked_multi ;
+    "roundtrip_masked_multi", roundtrip_masked_multi ;
     "async", async ;
   ]
 

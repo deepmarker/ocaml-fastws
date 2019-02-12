@@ -19,12 +19,6 @@ let merge_headers h1 h2 =
 
 let response_handler iv nonce crypto
     ({ Response.version ; status ; headers ; _ } as response) _body =
-  (* Body.schedule_read body
-   *   ~on_eof:(fun () -> ())
-   *   ~on_read:begin fun buf ~off ~len ->
-   *     let str = Bigstringaf.substring buf ~off ~len in
-   *     Logs.err ~src (fun m -> m "%s" str)
-   *   end ; *)
   let module Crypto = (val crypto : CRYPTO) in
   Logs.debug ~src (fun m -> m "%a" Response.pp_hum response) ;
   let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get headers "upgrade") in
@@ -57,7 +51,8 @@ let error_handler signal e =
   Ivar.fill_if_empty signal false
 
 let connect
-    ?(crypto=(module Crypto : CRYPTO))
+    ?(stream = Faraday.create 4096)
+    ?(crypto = (module Crypto : CRYPTO))
     ?(extra_headers = Headers.empty)
     uri =
   let open Conduit_async in
@@ -65,7 +60,6 @@ let connect
   let initialized = Ivar.create () in
   let client_r, ws_w = Pipe.create () in
   let ws_r, client_w = Pipe.create () in
-  let stream = Faraday.create 4096 in
   let run (V3.Inet_sock socket) r _ =
     let writev = Faraday_async.writev_of_fd (Socket.fd socket) in
     let rec flush () =
@@ -77,8 +71,7 @@ let connect
         | `Closed -> raise Exit
         | `Ok n ->
           Faraday.shift stream n ;
-          flush ()
-    in
+          flush () in
     let nonce =
       Base64.encode_exn Crypto.(generate 16 |> to_string) in
     let headers =
@@ -88,24 +81,34 @@ let connect
     let error_handler = error_handler ok in
     let response_handler =
       response_handler ok nonce (module Crypto) in
-    let _body =
-      Httpaf_async.Client.request socket ~error_handler ~response_handler in
-    (* let rec flush_req () =
-     *   Logs.debug ~src (fun m -> m "A") ;
-     *   match Client_connection.next_write_operation conn with
-     *   | `Write iovecs ->
-     *     Logs.debug ~src (fun m -> m "B") ;
-     *     writev iovecs >>> fun result ->
-     *     Client_connection.report_write_result conn result ;
-     *     flush_req ()
-     *   | `Yield ->
-     *     Logs.debug ~src (fun m -> m "C") ;
-     *     Client_connection.yield_writer conn flush_req ;
-     *   | `Close _ ->
-     *     Logs.debug ~src (fun m -> m "D") ;
-     *     ()
-     * in *)
-    (* flush_req () ; *)
+    let _body, conn =
+      Client_connection.request req ~error_handler ~response_handler in
+    let rec flush_req () =
+      match Client_connection.next_write_operation conn with
+      | `Write iovecs ->
+        writev iovecs >>> fun result ->
+        Client_connection.report_write_result conn result ;
+        flush_req ()
+      | `Yield ->
+        Client_connection.yield_writer conn flush_req ;
+      | `Close _ -> () in
+    let rec read_response () =
+      match Client_connection.next_read_operation conn with
+      | `Close -> Deferred.unit
+      | `Read -> begin
+          Reader.read_one_chunk_at_a_time r
+            ~handle_chunk:begin fun buf ~pos ~len ->
+              let nb_read = Client_connection.read conn buf ~off:pos ~len in
+              return (`Stop_consumed ((), nb_read))
+            end >>= function
+          | `Eof
+          | `Eof_with_unconsumed_data _ ->
+            raise Exit
+          | `Stopped () ->
+            read_response ()
+        end in
+    flush_req () ;
+    don't_wait_for (read_response ()) ;
     Logs_async.debug ~src
       (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
     Ivar.read ok >>= function
@@ -122,34 +125,28 @@ let connect
           Logs_async.debug ~src (fun m -> m "-> %a" pp t)
         end
       end ;
-      (* Angstrom_async.parse_many parser begin fun t ->
-       *   Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-       *   Pipe.write ws_w t
-       * end r >>= function
-       * | Error msg ->
-       *   Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
-       *   failwith msg
-       * | Ok () ->
-       *   Deferred.unit *)
-        ignore ws_w ;
-        Reader.read_one_chunk_at_a_time r ~handle_chunk:begin fun buf ~pos ~len ->
-          Logs_async.debug ~src begin fun m ->
-            m "READ %S" (Bigstringaf.substring buf ~off:pos ~len)
-          end >>| fun () ->
-          `Consumed (len, `Need_unknown)
-        end >>= fun _ ->
+      (* let rec loop () =
+       *   Logs.debug ~src (fun m -> m "BEFORE PARSE") ;
+       *   Angstrom_async.parse parser r >>= function
+       *   | Error msg ->
+       *     Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
+       *     failwith msg
+       *   | Ok t ->
+       *     Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
+       *     Pipe.write ws_w t >>= fun () ->
+       *     loop () in
+       * don't_wait_for (Deferred.ignore (loop ())) ;
+       * Deferred.unit *)
+      Angstrom_async.parse_many parser begin fun t ->
+        Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
+        Pipe.write ws_w t
+      end r >>= function
+      | Error msg ->
+        Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
+        failwith msg
+      | Ok () ->
+        Logs_async.err ~src (fun m -> m "Connection terminated") >>= fun () ->
         Deferred.unit
-        (* let rec loop () =
-         *   Logs.debug ~src (fun m -> m "BEFORE PARSE %a" Sexp.pp (Io_stats.sexp_of_t Reader.io_stats)) ;
-         *   Angstrom_async.parse parser r >>= function
-         *   | Error msg ->
-         *     Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
-         *     failwith msg
-         *   | Ok t ->
-         *     Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-         *     Pipe.write ws_w t >>= fun () ->
-         *     loop () in
-         * loop () *)
   in
   don't_wait_for begin
     Monitor.protect ~here:[%here]
@@ -159,10 +156,8 @@ let connect
   Ivar.read initialized >>| fun () ->
   client_r, client_w
 
-let with_connection
-    ?(crypto=(module Crypto : CRYPTO))
-    ?extra_headers uri ~f =
-  connect ?extra_headers ~crypto uri >>= fun (r, w) ->
+let with_connection ?stream ?crypto ?extra_headers uri ~f =
+  connect ?stream ?extra_headers ?crypto uri >>= fun (r, w) ->
   protect
     ~f:(fun () -> f r w)
     ~finally:(fun () -> Pipe.close w ; Pipe.close_read r)

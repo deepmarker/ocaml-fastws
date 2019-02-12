@@ -16,5 +16,4 @@
   logs-async
   conduit-async
   angstrom-async
-  faraday-async
-  httpaf-async))
+  faraday-async))

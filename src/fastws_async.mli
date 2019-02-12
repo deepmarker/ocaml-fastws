@@ -10,12 +10,14 @@ open Httpaf
 open Fastws
 
 val connect :
+  ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
   Uri.t ->
   (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
 
 val with_connection :
+  ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
   Uri.t ->

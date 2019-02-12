@@ -175,7 +175,7 @@ type state = {
   len : int64 ;
 }
 
-let init = {
+let init () = {
   pos = Hdr1 ;
   buf = Buffer.create 13 ;
   mask = None ;
@@ -198,7 +198,7 @@ let xormask ~mask buf =
 let parser =
   let open Angstrom in
   scan_state
-    (init, create Opcode.Continuation) begin fun (state, frame) c ->
+    (init (), create Opcode.Continuation) begin fun (state, frame) c ->
     match state.pos with
     | Hdr1 ->
       let final = get_finmask c in
@@ -268,7 +268,6 @@ let parser =
         let buf = Buffer.to_bytes st.buf in
         xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
         { t with content = Bytes.unsafe_to_string buf } in
-    Buffer.clear st.buf ;
     ret
   end
 
