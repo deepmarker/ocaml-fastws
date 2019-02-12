@@ -1,6 +1,5 @@
 open Async
 open Alcotest
-(* open Alcotest_async *)
 open Fastws
 
 let () =
@@ -69,8 +68,8 @@ let roundtrip_masked =
     n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
   end frames
 
-let async = [
-  (* test_case "connect" `Quick connect ; *)
+let async = Alcotest_async.[
+  test_case "connect" `Quick connect ;
   (* test_case "with_connection_ez" `Quick with_connection_ez ; *)
 ]
 
