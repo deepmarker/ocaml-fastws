@@ -102,20 +102,16 @@ let connect
           Logs_async.debug ~src (fun m -> m "-> %a" pp t)
         end
       end ;
-      (* ignore r ;
-       * ignore ws_w ;
-       * Deferred.never () *)
-      Angstrom_async.parse_many empty_parser begin fun t ->
-        Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-        Pipe.write ws_w t
-      end r >>= function
-      | Error msg ->
-        Logs_async.debug ~src (fun m -> m "%s" msg) >>= fun () ->
-        failwith msg
-      | Ok () ->
-        Logs_async.debug
-          ~src (fun m -> m "Websocket terminating") >>= fun () ->
-        Deferred.unit
+      let rec loop () =
+        Angstrom_async.parse parser r >>= function
+        | Error msg ->
+          Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
+          failwith msg
+        | Ok t ->
+          Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
+          Pipe.write ws_w t >>= fun () ->
+          loop () in
+      loop ()
   in
   don't_wait_for begin
     Monitor.protect ~here:[%here]

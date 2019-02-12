@@ -169,7 +169,7 @@ type state = {
   len : int64 ;
 }
 
-let start = {
+let create_state () = {
   pos = Hdr1 ;
   buf = Buffer.create 13 ;
   mask = None ;
@@ -188,29 +188,20 @@ let xormask ~mask buf =
     Bytes.set buf i (xor_char c (String.get mask (i mod 4)))
   end buf
 
-let empty_parser =
-  let open Angstrom in
-  let complete_frame = ref (create Opcode.Text) in
-  lift (fun _ -> !complete_frame) @@
-  (* skip (fun _ -> true) *)
-  any_char
-  (* scan_state (start, !complete_frame) (fun _ _ -> None) *)
-
 let parser =
   let open Angstrom in
-  let complete_frame = ref (create Opcode.Text) in
-  lift (fun _ -> !complete_frame) @@
-  scan_state (start, !complete_frame) begin fun (state, frame) c ->
+  scan_state
+    (create_state (), create Opcode.Continuation) begin fun (state, frame) c ->
     match state.pos with
     | Hdr1 ->
-      Logs.debug (fun m -> m "HDR1") ;
+      Logs.debug (fun m -> m "HDR1 %C" c) ;
       let final = get_finmask c in
       let extension = get_extension c in
       let opcode = get_opcode c in
-      Some ({ start with pos = Hdr2 },
+      Some ({ state with pos = Hdr2 },
             create ~extension ~final opcode)
     | Hdr2 ->
-      Logs.debug (fun m -> m "HDR2") ;
+      Logs.debug (fun m -> m "HDR2 %C" c) ;
       let state =
         if get_finmask c then
           { state with mask = Some (Bytes.create 4) }
@@ -221,7 +212,7 @@ let parser =
         | 127 -> Some ({ state with pos = Len 7 }, frame)
         | n when state.mask = None ->
           let len = Int64.of_int n in
-          Some ({ state with pos = Data (Int64.of_int (pred n)) ; len }, frame)
+          Some ({ state with pos = Data (Int64.pred len) ; len }, frame)
         | n ->
           let len = Int64.of_int n in
           Some ({ state with pos = Mask 3 ; len }, frame)
@@ -231,7 +222,7 @@ let parser =
         let len = Int64.(add state.len (of_int (Char.code c))) in
         match state.mask with
         | Some _ -> Some ({ state with pos = Mask 3 ; len }, frame)
-        | None -> Some ({ state with pos = Data state.len ; len }, frame)
+        | None -> Some ({ state with pos = Data (Int64.pred len) ; len }, frame)
       end
     | Len n ->
       Logs.debug (fun m -> m "LEN %d" n) ;
@@ -256,21 +247,23 @@ let parser =
       end
     | Data 0L ->
       Logs.debug (fun m -> m "Data0") ;
-      let content = begin
-        match state.mask with
-        | None -> Buffer.contents state.buf
-        | Some mask ->
-          let buf = Buffer.to_bytes state.buf in
-          xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
-          Bytes.unsafe_to_string buf
-      end in
-      complete_frame := { frame with content } ;
+      Buffer.add_char state.buf c ;
       None
     | Data n ->
       Logs.debug (fun m -> m "Data %Ld" n) ;
       Buffer.add_char state.buf c ;
       Some ({ state with pos = Data (Int64.pred n) }, frame)
+  end |>
+  lift begin fun (st, t) ->
+    match st.mask with
+    | None ->
+      { t with content = Buffer.contents st.buf }
+    | Some mask ->
+      let buf = Buffer.to_bytes st.buf in
+      xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
+      { t with content = Bytes.unsafe_to_string buf }
   end
+
 
 let serialize ?mask t { opcode ; extension ; final ; content } =
   let open Faraday in
