@@ -167,19 +167,13 @@ type pos =
   | Len of int
   | Mask of int
   | Data of int64
+  | EOF
 
 type state = {
   pos : pos ;
   buf : Buffer.t ;
   mask : bytes option ;
   len : int64 ;
-}
-
-let init () = {
-  pos = Hdr1 ;
-  buf = Buffer.create 13 ;
-  mask = None ;
-  len = 0L
 }
 
 let get_finmask c = Char.code c land 0x80 <> 0
@@ -197,9 +191,16 @@ let xormask ~mask buf =
 
 let parser =
   let open Angstrom in
+  let init = {
+    pos = Hdr1 ;
+    buf = Buffer.create 13 ;
+    mask = None ;
+    len = 0L
+  } in
   scan_state
-    (init (), create Opcode.Continuation) begin fun (state, frame) c ->
+    (init, create Opcode.Continuation) begin fun (state, frame) c ->
     match state.pos with
+    | EOF -> None
     | Hdr1 ->
       let final = get_finmask c in
       let rsv = get_rsv c in
@@ -217,7 +218,7 @@ let parser =
                                           mask = Some (Bytes.create 4)}, frame)
         | n, false -> begin
             match Int64.of_int n with
-            | 0L -> None
+            | 0L -> Some ({ state with pos = EOF }, frame)
             | len ->
               Some ({ state with
                       pos = Data (Int64.pred len) ; len }, frame)
@@ -245,7 +246,7 @@ let parser =
         | Some buf ->
           Bytes.set buf (3 - n) c ;
           begin match n, state.len = 0L with
-            | 0, true -> None
+            | 0, true -> Some ({ state with pos = EOF }, frame)
             | 0, false ->
               Some ({ state with pos = Data (Int64.pred state.len) }, frame)
             | _ ->
@@ -254,7 +255,7 @@ let parser =
       end
     | Data 0L ->
       Buffer.add_char state.buf c ;
-      None
+      Some ({ state with pos = EOF }, frame)
     | Data n ->
       Buffer.add_char state.buf c ;
       Some ({ state with pos = Data (Int64.pred n) }, frame)
@@ -268,6 +269,7 @@ let parser =
         let buf = Buffer.to_bytes st.buf in
         xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
         { t with content = Bytes.unsafe_to_string buf } in
+    Buffer.clear st.buf ;
     ret
   end
 

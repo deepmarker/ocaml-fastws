@@ -44,23 +44,25 @@ let roundtrip ?mask descr frames () =
   Format.eprintf "buffer is %d bytes long@." len ;
   let frames' =
     let rec inner off len frames =
-      if off = len then List.rev frames else
-        match Angstrom.Unbuffered.parse parser with
-        | Partial { continue ; committed } -> begin
-            check int "commited" 0 committed ;
-            match continue buf ~off ~len Complete with
+      match Angstrom.Unbuffered.parse parser with
+      | Partial { continue ; _ } -> begin
+          let rec fixpoint off len continue =
+            Format.eprintf "fixpoint %d %d@." off len ;
+            match continue buf ~off ~len Angstrom.Unbuffered.Complete with
+            | Angstrom.Unbuffered.Partial { committed ; continue } ->
+              fixpoint (off + committed) (len - committed) continue
             | Done (0, _) ->
-              failwith "consumed zero"
+              List.rev frames
             | Done (consumed, v) ->
-              Format.eprintf "%a (consumed %d) @." Fastws.pp v consumed ;
+              Format.eprintf "%a (consumed %d)@." Fastws.pp v consumed ;
               inner (off + consumed) (len - consumed) (v :: frames)
             | Fail _ -> failwith "got fail"
-            | Partial _ -> failwith "got re partial"
-          end
-        | Done _
-        | _ -> invalid_arg "parser must be partial" in
-    inner 0 len []
-  in
+          in
+          fixpoint off len continue
+        end
+      | Done _
+      | _ -> invalid_arg "parser must be partial" in
+    inner 0 len [] in
   List.iter (fun fr -> Logs.debug (fun m -> m "%a" Fastws.pp fr)) frames' ;
   check int "roundtrip list size" (List.length frames) (List.length frames') ;
   List.iter2 (check frame descr) frames frames'
