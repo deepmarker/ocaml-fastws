@@ -42,27 +42,26 @@ let roundtrip ?mask descr frames () =
   let buf = Faraday.serialize_to_bigstring pp in
   let len = Bigstringaf.length buf in
   Format.eprintf "buffer is %d bytes long@." len ;
-  let frames' =
-    let rec inner off len frames =
+  let rec parse_all acc off len =
+    Format.eprintf "parse_all %d %d@." off len ;
       match Angstrom.Unbuffered.parse parser with
-      | Partial { continue ; _ } -> begin
-          let rec fixpoint off len continue =
-            Format.eprintf "fixpoint %d %d@." off len ;
-            match continue buf ~off ~len Angstrom.Unbuffered.Complete with
-            | Angstrom.Unbuffered.Partial { committed ; continue } ->
-              fixpoint (off + committed) (len - committed) continue
-            | Done (0, _) ->
-              List.rev frames
-            | Done (consumed, v) ->
-              Format.eprintf "%a (consumed %d)@." Fastws.pp v consumed ;
-              inner (off + consumed) (len - consumed) (v :: frames)
-            | Fail _ -> failwith "got fail"
-          in
-          fixpoint off len continue
+      | Partial { continue ; committed } -> begin
+          Format.eprintf "partial committed %d@." committed ;
+          match continue buf ~off ~len Angstrom.Unbuffered.Complete with
+          (* | Angstrom.Unbuffered.Partial { committed ; continue } ->
+           *   fixpoint (off + committed) (len - committed) continue frs *)
+          | Done (0, v) ->
+            Format.eprintf "Done (%d, %a)@." 0 Fastws.pp v ;
+            acc
+          | Done (consumed, v) ->
+            Format.eprintf "Done (%d, %a)@." consumed Fastws.pp v ;
+            parse_all (v::acc) (off + consumed) (len - consumed)
+          | _ -> failwith "must be done"
         end
       | Done _
-      | _ -> invalid_arg "parser must be partial" in
-    inner 0 len [] in
+      | _ -> invalid_arg "parser must be partial"
+  in
+  let frames' = parse_all [] 0 len in
   List.iter (fun fr -> Logs.debug (fun m -> m "%a" Fastws.pp fr)) frames' ;
   check int "roundtrip list size" (List.length frames) (List.length frames') ;
   List.iter2 (check frame descr) frames frames'
@@ -82,7 +81,7 @@ let connect () =
          * | `Ok fr when fr = close_fr ->
          *   Pipe.close w ;
          *   Pipe.close_read r ; *)
-          Deferred.unit
+        Deferred.unit
         (* | _ -> failwith "close frame has been altered" *)
       end
     | `Ok _ -> failwith "message has been altered"
@@ -119,9 +118,9 @@ let roundtrip_masked_multi =
   end multiframes
 
 let async = Alcotest_async.[
-  test_case "connect" `Quick connect ;
-  (* test_case "with_connection_ez" `Quick with_connection_ez ; *)
-]
+    test_case "connect" `Quick connect ;
+    (* test_case "with_connection_ez" `Quick with_connection_ez ; *)
+  ]
 
 let () =
   Alcotest.run "fastws" [
@@ -129,6 +128,6 @@ let () =
     "roundtrip_masked", roundtrip_masked ;
     "roundtrip_multi", roundtrip_unmasked_multi ;
     "roundtrip_masked_multi", roundtrip_masked_multi ;
-    "async", async ;
+    (* "async", async ; *)
   ]
 
