@@ -84,5 +84,6 @@ val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
 val close : ?msg:(Status.t * string) -> unit -> t
 val closef : Status.t -> ('a, Format.formatter, unit, t) format4 -> 'a
 
-val parser : t Angstrom.t
+val parser : t option Angstrom.t
+val parser_exn : t Angstrom.t
 val serialize : ?mask:string -> Faraday.t -> t -> unit

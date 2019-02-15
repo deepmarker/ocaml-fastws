@@ -137,7 +137,7 @@ let connect
        *     loop () in
        * don't_wait_for (Deferred.ignore (loop ())) ;
        * Deferred.unit *)
-      Angstrom_async.parse_many parser begin fun t ->
+      Angstrom_async.parse_many parser_exn begin fun t ->
         Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
         Pipe.write ws_w t
       end r >>= function

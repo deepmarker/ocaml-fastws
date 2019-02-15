@@ -166,14 +166,13 @@ type pos =
   | Hdr2
   | Len of int
   | Mask of int
-  | Data of int64
+  | Data of int
   | EOF
 
 type state = {
   pos : pos ;
-  buf : Buffer.t ;
   mask : bytes option ;
-  len : int64 ;
+  len : int ;
 }
 
 let get_finmask c = Char.code c land 0x80 <> 0
@@ -193,20 +192,17 @@ let parser =
   let open Angstrom in
   let init = {
     pos = Hdr1 ;
-    buf = Buffer.create 13 ;
     mask = None ;
-    len = 0L
+    len = 0 ;
   } in
-  scan_state
-    (init, create Opcode.Continuation) begin fun (state, frame) c ->
+  scan (init, create Opcode.Continuation) begin fun (state, frame) c ->
     match state.pos with
     | EOF -> None
     | Hdr1 ->
       let final = get_finmask c in
       let rsv = get_rsv c in
       let opcode = get_opcode c in
-      Some ({ state with pos = Hdr2 },
-            create ~rsv ~final opcode)
+      Some ({ state with pos = Hdr2 }, create ~rsv ~final opcode)
     | Hdr2 ->
       begin
         match get_len c, get_finmask c with
@@ -217,61 +213,62 @@ let parser =
         | 127, true -> Some ({ state with pos = Len 7 ;
                                           mask = Some (Bytes.create 4)}, frame)
         | n, false -> begin
-            match Int64.of_int n with
-            | 0L -> Some ({ state with pos = EOF }, frame)
-            | len ->
-              Some ({ state with
-                      pos = Data (Int64.pred len) ; len }, frame)
+            match n with
+            | 0   -> Some ({ state with pos = EOF }, frame)
+            | len -> Some ({ state with pos = Data (pred len) ; len }, frame)
           end
         | n, true ->
-          Some ({ state with
-                  pos = Mask 3 ;
+          Some ({ pos = Mask 3 ;
                   mask = Some (Bytes.create 4) ;
-                  len = Int64.of_int n }, frame)
+                  len = n }, frame)
       end
     | Len 0 -> begin
-        let len = Int64.(logor state.len (of_int (Char.code c))) in
+        let len = state.len lor Char.code c in
         match state.mask with
         | Some _ -> Some ({ state with pos = Mask 3 ; len }, frame)
-        | None ->
-          Some ({ state with pos = Data (Int64.pred len) ; len }, frame)
+        | None   -> Some ({ state with pos = Data (pred len) ; len }, frame)
       end
     | Len n ->
       let len =
-        Int64.(logor state.len (shift_left (of_int (Char.code c)) (8*n))) in
+        state.len lor ((Char.code c) lsl (8*n)) in
       Some ({ state with pos = Len (pred n) ; len }, frame)
     | Mask n -> begin
         match state.mask with
         | None -> assert false
         | Some buf ->
           Bytes.set buf (3 - n) c ;
-          begin match n, state.len = 0L with
+          begin match n, state.len = 0 with
             | 0, true -> Some ({ state with pos = EOF }, frame)
             | 0, false ->
-              Some ({ state with pos = Data (Int64.pred state.len) }, frame)
+              Some ({ state with pos = Data (pred state.len) }, frame)
             | _ ->
               Some ({ state with pos = Mask (pred n) }, frame)
           end
       end
-    | Data 0L ->
-      Buffer.add_char state.buf c ;
+    | Data 0 ->
       Some ({ state with pos = EOF }, frame)
     | Data n ->
-      Buffer.add_char state.buf c ;
-      Some ({ state with pos = Data (Int64.pred n) }, frame)
+      Some ({ state with pos = Data (pred n) }, frame)
   end |>
-  lift begin fun (st, t) ->
-    let ret =
+  lift begin fun (content, (st, frame)) ->
+    if String.length content < 2 then None
+    else
+      let skip = if st.len < 126 then 2
+        else if st.len < 1 lsl 16 then 4
+        else 10 in
       match st.mask with
       | None ->
-        { t with content = Buffer.contents st.buf }
+        Some { frame with content = String.sub content skip st.len }
       | Some mask ->
-        let buf = Buffer.to_bytes st.buf in
+        let content = String.sub content (skip + 4) st.len in
+        let buf = Bytes.unsafe_of_string content in
         xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
-        { t with content = Bytes.unsafe_to_string buf } in
-    Buffer.clear st.buf ;
-    ret
+        Some { frame with content = Bytes.unsafe_to_string buf }
   end
+
+let parser_exn =
+  Angstrom.lift
+    (function None -> failwith "parser_exn" | Some v -> v) parser
 
 let serialize ?mask t { opcode ; rsv ; final ; content } =
   let open Faraday in

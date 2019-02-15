@@ -6,9 +6,6 @@ let () =
   Logs.set_level (Some Debug) ;
   Logs.set_reporter (Logs_async_reporter.reporter ())
 
-let parse =
-  Angstrom.parse_string Fastws.parser
-
 let frames = [
   "empty text"        , create Opcode.Text ;
   "text with content" , create ~content:"test" Opcode.Text ;
@@ -36,32 +33,31 @@ let multiframes = [
 
 let frame = testable pp equal
 
+let filter_map f l =
+  List.fold_right
+    (fun e a -> match f e with None -> a | Some v -> v :: a) l []
+
 let roundtrip ?mask descr frames () =
   let pp = Faraday.create 256 in
   List.iter (serialize ?mask pp) frames ;
   let buf = Faraday.serialize_to_bigstring pp in
   let len = Bigstringaf.length buf in
   Format.eprintf "buffer is %d bytes long@." len ;
-  let rec parse_all acc off len =
-    Format.eprintf "parse_all %d %d@." off len ;
-      match Angstrom.Unbuffered.parse parser with
-      | Partial { continue ; committed } -> begin
-          Format.eprintf "partial committed %d@." committed ;
-          match continue buf ~off ~len Angstrom.Unbuffered.Complete with
-          (* | Angstrom.Unbuffered.Partial { committed ; continue } ->
-           *   fixpoint (off + committed) (len - committed) continue frs *)
-          | Done (0, v) ->
-            Format.eprintf "Done (%d, %a)@." 0 Fastws.pp v ;
-            acc
-          | Done (consumed, v) ->
-            Format.eprintf "Done (%d, %a)@." consumed Fastws.pp v ;
-            parse_all (v::acc) (off + consumed) (len - consumed)
-          | _ -> failwith "must be done"
-        end
-      | Done _
-      | _ -> invalid_arg "parser must be partial"
-  in
-  let frames' = parse_all [] 0 len in
+  let rec inner acc consumed =
+    match Angstrom.(Unbuffered.parse parser) with
+    | Partial { continue ; committed  = _ } -> begin
+        Format.eprintf "inner %d %d@." consumed (len - consumed) ;
+        match continue buf ~off:consumed ~len:(len - consumed) Angstrom.Unbuffered.Complete with
+        | Done (0, _) ->
+          Format.eprintf "Done.@." ;
+          List.rev acc
+        | Done (c, vs) ->
+          Format.eprintf "Done %d@." c ;
+          inner (filter_map (fun x -> x) [vs]) (consumed + c)
+        | _ -> failwith "must be done"
+      end
+    | _ -> failwith "should not happen" in
+  let frames' = inner [] 0 in
   List.iter (fun fr -> Logs.debug (fun m -> m "%a" Fastws.pp fr)) frames' ;
   check int "roundtrip list size" (List.length frames) (List.length frames') ;
   List.iter2 (check frame descr) frames frames'
