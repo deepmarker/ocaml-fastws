@@ -5,8 +5,6 @@
 
 open Sexplib.Std
 
-open Httpaf
-
 module type CRYPTO = sig
   type buffer
   type g
@@ -33,7 +31,7 @@ end
 let websocket_uuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 let headers ?protocols nonce =
-  Headers.of_list @@
+  Httpaf.Headers.of_list @@
   ("Upgrade", "websocket") ::
   ("Connection", "Upgrade") ::
   ("Sec-WebSocket-Key", nonce) ::
@@ -121,11 +119,18 @@ module Opcode = struct
     | Nonctrl i      -> i
 end
 
+(* let bytes_of_sexp sexp =
+ *   Bytes.unsafe_of_string (string_of_sexp sexp)
+ * 
+ * let sexp_of_bytes bytes =
+ *   sexp_of_string (Bytes.unsafe_to_string bytes) *)
+
 type t = {
   opcode : Opcode.t ;
   rsv : int ;
   final : bool ;
-  content: string ;
+  length : int ;
+  mask : string option ;
 } [@@deriving sexp]
 
 let compare = Pervasives.compare
@@ -136,44 +141,30 @@ let pp ppf t =
 
 let show t = Format.asprintf "%a" pp t
 
-let create ?(rsv=0) ?(final=true) ?(content="") opcode =
-  { opcode ; rsv ; final ; content }
+let create ?(rsv=0) ?(final=true) ?(length=0) ?mask opcode =
+  { opcode ; rsv ; final ; length ; mask }
 
 let ping = create Opcode.Ping
 let pong = create Opcode.Pong
 
 let pingf fmt =
-  Format.kasprintf (fun content -> create ~content Opcode.Ping) fmt
+  Format.kasprintf (fun content -> create Opcode.Ping, content) fmt
 let pongf fmt =
-  Format.kasprintf (fun content -> create ~content Opcode.Pong) fmt
+  Format.kasprintf (fun content -> create Opcode.Pong, content) fmt
 
 let close ?msg () =
   match msg with
-  | None -> create Opcode.Close
+  | None -> create Opcode.Close, None
   | Some (status, msg) ->
     let msglen = String.length msg in
     let content = Bytes.create (2 + msglen) in
     EndianBytes.BigEndian.set_int16 content 0 (Status.to_int status) ;
     Bytes.blit_string msg 0 content 2 msglen ;
     let content = Bytes.unsafe_to_string content in
-    create ~content Opcode.Close
+    create Opcode.Close, Some content
 
 let closef status =
   Format.kasprintf (fun msg -> close ~msg:(status, msg) ())
-
-type pos =
-  | Hdr1
-  | Hdr2
-  | Len of int
-  | Mask of int
-  | Data of int
-  | EOF
-
-type state = {
-  pos : pos ;
-  mask : bytes option ;
-  len : int ;
-}
 
 let get_finmask c = Char.code c land 0x80 <> 0
 let get_rsv c = (Char.code c lsr 4) land 0x7
@@ -183,111 +174,80 @@ let get_opcode c = Opcode.of_int (Char.code c land 0xf)
 let xor_char a b =
   Char.(chr (code a lxor code b))
 
+(* let xormask ~mask buf =
+ *   Bytes.iteri begin fun i c ->
+ *     Bytes.set buf i (xor_char c (String.get mask (i mod 4)))
+ *   end buf *)
+
 let xormask ~mask buf =
-  Bytes.iteri begin fun i c ->
-    Bytes.set buf i (xor_char c (String.get mask (i mod 4)))
-  end buf
+  let open Bigstringaf in
+  for i = 0 to length buf do
+    set buf i (xor_char (get buf i) (String.get mask (i mod 4)))
+  done
 
-let parser =
-  let open Angstrom in
-  let init = {
-    pos = Hdr1 ;
-    mask = None ;
-    len = 0 ;
-  } in
-  scan (init, create Opcode.Continuation) begin fun (state, frame) c ->
-    match state.pos with
-    | EOF -> None
-    | Hdr1 ->
-      let final = get_finmask c in
-      let rsv = get_rsv c in
-      let opcode = get_opcode c in
-      Some ({ state with pos = Hdr2 }, create ~rsv ~final opcode)
-    | Hdr2 ->
-      begin
-        match get_len c, get_finmask c with
-        | 126, false -> Some ({ state with pos = Len 1 }, frame)
-        | 127, false -> Some ({ state with pos = Len 7 }, frame)
-        | 126, true -> Some ({ state with pos = Len 1 ;
-                                          mask = Some (Bytes.create 4)}, frame)
-        | 127, true -> Some ({ state with pos = Len 7 ;
-                                          mask = Some (Bytes.create 4)}, frame)
-        | n, false -> begin
-            match n with
-            | 0   -> Some ({ state with pos = EOF }, frame)
-            | len -> Some ({ state with pos = Data (pred len) ; len }, frame)
-          end
-        | n, true ->
-          Some ({ pos = Mask 3 ;
-                  mask = Some (Bytes.create 4) ;
-                  len = n }, frame)
-      end
-    | Len 0 -> begin
-        let len = state.len lor Char.code c in
-        match state.mask with
-        | Some _ -> Some ({ state with pos = Mask 3 ; len }, frame)
-        | None   -> Some ({ state with pos = Data (pred len) ; len }, frame)
-      end
-    | Len n ->
-      let len =
-        state.len lor ((Char.code c) lsl (8*n)) in
-      Some ({ state with pos = Len (pred n) ; len }, frame)
-    | Mask n -> begin
-        match state.mask with
-        | None -> assert false
-        | Some buf ->
-          Bytes.set buf (3 - n) c ;
-          begin match n, state.len = 0 with
-            | 0, true -> Some ({ state with pos = EOF }, frame)
-            | 0, false ->
-              Some ({ state with pos = Data (pred state.len) }, frame)
-            | _ ->
-              Some ({ state with pos = Mask (pred n) }, frame)
-          end
-      end
-    | Data 0 ->
-      Some ({ state with pos = EOF }, frame)
-    | Data n ->
-      Some ({ state with pos = Data (pred n) }, frame)
-  end |>
-  lift begin fun (content, (st, frame)) ->
-    if String.length content < 2 then None
-    else
-      let skip = if st.len < 126 then 2
-        else if st.len < 1 lsl 16 then 4
-        else 10 in
-      match st.mask with
-      | None ->
-        Some { frame with content = String.sub content skip st.len }
-      | Some mask ->
-        let content = String.sub content (skip + 4) st.len in
-        let buf = Bytes.unsafe_of_string content in
-        xormask ~mask:(Bytes.unsafe_to_string mask) buf ;
-        Some { frame with content = Bytes.unsafe_to_string buf }
-  end
+type parse_result =
+  [`More of int | `Ok of t * int]
 
-let parser_exn =
-  Angstrom.lift
-    (function None -> failwith "parser_exn" | Some v -> v) parser
+let parse buf ~pos ~len =
+  if len < 0 then
+    invalid_arg "parse: len < 0" ;
+  if len < 2 then `More (2 - len)
+  else
+    let b1 = Bigstringaf.get buf pos in
+    let b2 = Bigstringaf.get buf (pos+1) in
+    let final = get_finmask b1 in
+    let rsv = get_rsv b1 in
+    let opcode = get_opcode b1 in
+    let masked = get_finmask b2 in
+    let len = get_len b2 in
+    match len, masked with
+    | 126, false ->
+      let reql = 2 + 2 in
+      if len < reql then `More (reql - len)
+      else
+        let length = Bigstringaf.get_int16_be buf (pos+2) in
+        `Ok (create ~final ~rsv ~length opcode, reql)
+    | 126, true ->
+      let reql = 2 + 2 + 4 in
+      if len < reql then `More (reql - len)
+      else
+        let length = Bigstringaf.get_int16_be buf (pos+2) in
+        let mask = Bigstringaf.substring buf ~off:(pos+4) ~len:4 in
+        `Ok ((create ~final ~rsv ~length ~mask opcode), reql)
+    | 127, false ->
+      let reql = 2 + 8 in
+      if len < reql then `More (reql - len)
+      else
+        let length = Bigstringaf.get_int64_be buf (pos+2) in
+        let length = Int64.to_int length in
+        `Ok ((create ~final ~rsv ~length opcode), reql)
+    | 127, true ->
+      let reql = 2 + 8 + 4 in
+      if len < reql then `More (reql - len)
+      else
+        let length = Bigstringaf.get_int64_be buf (pos+2) in
+        let length = Int64.to_int length in
+        let mask = Bigstringaf.substring buf ~off:(pos+10) ~len:4 in
+        `Ok (create ~final ~rsv ~length ~mask opcode, reql)
+    | length, true ->
+      let reql = 2 + 4 in
+      if len < reql then `More (reql - len)
+      else
+        let mask = Bigstringaf.substring buf ~off:(pos+2) ~len:4 in
+        `Ok (create ~final ~rsv ~mask ~length opcode, reql)
+    | length, false -> `Ok (create ~final ~rsv ~length opcode, 2)
 
-let serialize ?mask t { opcode ; rsv ; final ; content } =
+let serialize t { opcode ; rsv ; final ; length ; mask } =
   let open Faraday in
   let b1 = Opcode.to_int opcode lor (rsv lsl 4) in
   write_uint8 t (if final then 0x80 lor b1 else b1) ;
-  let len = String.length content in
-  let len' =
-    if len < 126 then len else if len < 1 lsl 16 then 126 else 127 in
-  write_uint8 t (match mask with None -> len' | Some _ -> 0x80 lor len') ;
+  let len =
+    if length < 126 then length else if length < 1 lsl 16 then 126 else 127 in
+  write_uint8 t (match mask with None -> len | Some _ -> 0x80 lor len) ;
   begin
-    if len' = 126 then BE.write_uint16 t len
-    else if len' = 127 then BE.write_uint64 t (Int64.of_int len)
+    if len = 126 then BE.write_uint16 t len
+    else if len = 127 then BE.write_uint64 t (Int64.of_int len)
   end ;
   match mask with
-  | None ->
-    write_string t content
-  | Some mask ->
-    write_string t mask ;
-    String.iteri begin fun i c ->
-      write_char t (xor_char c (String.get mask (i mod 4)))
-    end content
-
+  | None -> ()
+  | Some mask -> write_string t mask

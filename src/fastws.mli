@@ -63,7 +63,8 @@ type t = {
   opcode: Opcode.t ;
   rsv: int ;
   final: bool ;
-  content: string ;
+  length: int ;
+  mask : string option ;
 } [@@deriving sexp]
 
 val compare : t -> t -> int
@@ -73,17 +74,21 @@ val pp : Format.formatter -> t -> unit
 val show : t -> string
 
 val create :
-  ?rsv:int -> ?final:bool -> ?content:string -> Opcode.t -> t
+  ?rsv:int -> ?final:bool -> ?length:int -> ?mask:string -> Opcode.t -> t
 
 val ping : t
-val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
+val pingf : ('a, Format.formatter, unit, t * string) format4 -> 'a
 
 val pong : t
-val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
+val pongf : ('a, Format.formatter, unit, t * string) format4 -> 'a
 
-val close : ?msg:(Status.t * string) -> unit -> t
-val closef : Status.t -> ('a, Format.formatter, unit, t) format4 -> 'a
+val close : ?msg:(Status.t * string) -> unit -> t * string option
+val closef :
+  Status.t -> ('a, Format.formatter, unit, t * string option) format4 -> 'a
 
-val parser : t option Angstrom.t
-val parser_exn : t Angstrom.t
-val serialize : ?mask:string -> Faraday.t -> t -> unit
+val xormask : mask:string -> Bigstringaf.t -> unit
+
+type parse_result = [`More of int | `Ok of t * int]
+val parse : Bigstringaf.t -> pos:int -> len:int -> parse_result
+
+val serialize : Faraday.t -> t -> unit

@@ -9,6 +9,10 @@ open Httpaf
 
 open Fastws
 
+type t =
+  | Header of Fastws.t
+  | Payload of Bigstringaf.t
+
 let src =
   Logs.Src.create "fastws.async"
 
@@ -54,11 +58,10 @@ let connect
     ?(stream = Faraday.create 4096)
     ?(crypto = (module Crypto : CRYPTO))
     ?(extra_headers = Headers.empty)
-    uri =
+    ~handle uri =
   let open Conduit_async in
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
-  let client_r, ws_w = Pipe.create () in
   let ws_r, client_w = Pipe.create () in
   let run (V3.Inet_sock socket) r _ =
     let writev = Faraday_async.writev_of_fd (Socket.fd socket) in
@@ -118,35 +121,50 @@ let connect
       Logs_async.debug ~src
         (fun m -> m "Connected to %a" Uri.pp_hum uri) >>= fun () ->
       don't_wait_for begin
-        Pipe.iter ws_r ~f:begin fun t ->
-          let mask = Crypto.(to_string (generate 4)) in
-          serialize ~mask stream t ;
-          flush () >>= fun () ->
-          Logs_async.debug ~src (fun m -> m "-> %a" pp t)
+        let current_header = ref None in
+        Pipe.iter ws_r ~f:begin function
+          | Header t ->
+            let mask = Crypto.(to_string (generate 4)) in
+            let h = { t with mask = Some mask } in
+            current_header := Some h ;
+            serialize stream h ;
+            flush () >>= fun () ->
+            Logs_async.debug ~src (fun m -> m "-> %a" pp t)
+          | Payload buf ->
+            match !current_header with
+            | Some { mask = Some mask ; _ } ->
+              xormask ~mask buf ;
+              Faraday.write_bigstring stream buf ;
+              flush ()
+            | _ ->
+              failwith "current header must exist"
         end
       end ;
-      (* let rec loop () =
-       *   Logs.debug ~src (fun m -> m "BEFORE PARSE") ;
-       *   Angstrom_async.parse parser r >>= function
-       *   | Error msg ->
-       *     Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
-       *     failwith msg
-       *   | Ok t ->
-       *     Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-       *     Pipe.write ws_w t >>= fun () ->
-       *     loop () in
-       * don't_wait_for (Deferred.ignore (loop ())) ;
-       * Deferred.unit *)
-      Angstrom_async.parse_many parser_exn begin fun t ->
-        Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-        Pipe.write ws_w t
-      end r >>= function
-      | Error msg ->
-        Logs_async.err ~src (fun m -> m "%s" msg) >>= fun () ->
-        failwith msg
-      | Ok () ->
+      let len_to_read = ref 0 in
+      let handle_chunk buf ~pos ~len =
+        if !len_to_read > 0 then begin
+          let will_read = min len !len_to_read in
+          len_to_read := !len_to_read - will_read ;
+          handle (Payload (Bigstringaf.sub buf ~off:pos ~len)) >>= fun () ->
+          return (`Consumed (will_read, `Need !len_to_read))
+        end
+        else
+          match parse buf ~pos ~len with
+          | `More n ->
+            return (`Consumed (0, `Need (len + n)))
+          | `Ok (t, read) ->
+            Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
+            handle (Header t) >>= fun () ->
+            len_to_read := t.length ;
+            return (`Consumed (read, `Need t.length))
+      in
+      Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
+      | `Stopped _ ->
         Logs_async.err ~src (fun m -> m "Connection terminated") >>= fun () ->
         Deferred.unit
+      | `Eof
+      | `Eof_with_unconsumed_data _ ->
+        raise End_of_file
   in
   don't_wait_for begin
     Monitor.protect ~here:[%here]
@@ -154,15 +172,73 @@ let connect
       ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
   end ;
   Ivar.read initialized >>| fun () ->
-  client_r, client_w
+  client_w
 
-let with_connection ?stream ?crypto ?extra_headers uri ~f =
-  connect ?stream ?extra_headers ?crypto uri >>= fun (r, w) ->
-  protect
-    ~f:(fun () -> f r w)
-    ~finally:(fun () -> Pipe.close w ; Pipe.close_read r)
+let with_connection ?stream ?crypto ?extra_headers uri ~handle ~f =
+  connect ?stream ?extra_headers ?crypto ~handle uri >>= fun w ->
+  protect ~f:(fun () -> f w) ~finally:(fun () -> Pipe.close w)
 
 exception Timeout of Int63.t
+
+let handle client_w ws_w last_pong =
+  let buf = Bigbuffer.create 13 in
+  let cont = ref `No in
+  let current_header = ref None in
+  let bytes_to_read = ref 0 in
+  function
+  | Payload b when !cont = `No ->
+    Pipe.write client_w (Bigstring.to_string b)
+  | Payload b when !cont = `End ->
+    cont := `No ;
+    Bigbuffer.add_bigstring buf b ;
+    Pipe.write client_w (Bigbuffer.contents buf)
+  | Payload b ->
+    Bigbuffer.add_bigstring buf b ;
+    Deferred.unit
+  | Header h ->
+    current_header := Some h ;
+    bytes_to_read := h.length ;
+    match h with
+    | { opcode = Ping ; _ } ->
+      Pipe.write ws_w pong
+    | ({ opcode = Close ; _ } as fr) ->
+      Pipe.write ws_w fr >>| fun () ->
+      Pipe.close ws_w ;
+      Pipe.close client_w
+    | { opcode = Pong ; _ } ->
+      last_pong := Time_stamp_counter.now () ;
+      Deferred.unit
+    | { opcode = Continuation ; final = true ; _ } ->
+      cont := `End ;
+      Deferred.unit
+    | { opcode = Continuation ; _ } ->
+      cont := `Yes ;
+      Deferred.unit
+    | { opcode = Text ; _ }
+    | { opcode = Binary ; _ } when h.final ->
+      Deferred.unit
+    | Text
+    | Binary when not !cont ->
+      cont := true ;
+      Buffer.clear buf ;
+      Buffer.add_string buf fr.content ;
+      return None
+    | Text
+    | Binary ->
+      let close_msg =
+        close ~msg:begin
+          Status.ProtocolError,
+          "Fragmented message ongoing"
+        end () in
+      Pipe.write w close_msg >>| fun () ->
+      Pipe.close w ;
+      None
+    | _ ->
+      let close_msg =
+        close ~msg:(Status.UnsupportedExtension, "") () in
+      Pipe.write w close_msg >>| fun () ->
+      Pipe.close w ;
+      None
 
 let connect_ez
     ?(crypto=(module Crypto : CRYPTO))
@@ -171,6 +247,7 @@ let connect_ez
     ?hb_ns
     uri =
   let ws_read, client_write = Pipe.create () in
+  let client_read, ws_write = Pipe.create () in
   let cleaned_up = Ivar.create () in
   let last_pong = ref (Time_stamp_counter.now ()) in
   let cleanup ?rw () =
@@ -191,14 +268,14 @@ let connect_ez
     Monitor.protect ~here:[%here]
       ~finally:(fun () -> cleanup () ; Deferred.unit)
       begin fun () ->
-        with_connection ?extra_headers ~crypto uri ~f:begin fun r w ->
+        with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
           let m = Monitor.current () in
           begin match hb_ns with
             | None -> ()
             | Some span ->
               let send_ping () =
                 let now = Time_stamp_counter.now () in
-                Pipe.write w ping >>= fun () ->
+                Pipe.write w (Header ping) >>= fun () ->
                 let elapsed = Time_stamp_counter.diff now !last_pong in
                 let elapsed = Time_stamp_counter.Span.to_ns elapsed in
                 if Int63.(elapsed < span + span) then Deferred.unit
@@ -216,60 +293,20 @@ let connect_ez
                 (Time_ns.Span.of_int63_ns span)
                 send_ping
           end ;
-          let filter =
-            let buf = Buffer.create 13 in
-            let cont = ref false in
-            fun fr ->
-              match fr.opcode with
-              | Opcode.Ping ->
-                Pipe.write w pong >>| fun () ->
-                None
-              | Close ->
-                Pipe.write w fr >>| fun () ->
-                Pipe.close w ;
-                None
-              | Pong ->
-                last_pong := Time_stamp_counter.now (); return None
-              | Continuation when fr.final ->
-                cont := false ;
-                Buffer.add_string buf fr.content ;
-                return (Some (Buffer.contents buf))
-              | Continuation ->
-                Buffer.add_string buf fr.content ;
-                return None
-              | Text
-              | Binary when fr.final ->
-                return (Some fr.content)
-              | Text
-              | Binary when not !cont ->
-                cont := true ;
-                Buffer.clear buf ;
-                Buffer.add_string buf fr.content ;
-                return None
-              | Text
-              | Binary ->
-                let close_msg =
-                  close ~msg:begin
-                    Status.ProtocolError,
-                    "Fragmented message ongoing"
-                  end () in
-                Pipe.write w close_msg >>| fun () ->
-                Pipe.close w ;
-                None
-              | _ ->
-                let close_msg =
-                  close ~msg:(Status.UnsupportedExtension, "") () in
-                Pipe.write w close_msg >>| fun () ->
-                Pipe.close w ;
-                None
-          in
-          let client_read = Pipe.filter_map' r ~f:filter in
           Ivar.fill client_read_iv client_read ;
-          let react () =
+          let assemble_frames () =
             let opcode = if binary then Opcode.Binary else Text in
-            Pipe.transfer ws_read w ~f:(fun content -> create ~content opcode) in
+            Pipe.transfer' ws_read w ~f:begin fun mq ->
+              let wq = Queue.create () in
+              Queue.iter mq ~f:begin fun m ->
+                  Queue.enqueue wq (Header (create opcode)) ;
+                  Queue.enqueue wq (Payload (Bigstring.of_string m)) ;
+              end ;
+              return wq
+            end
+          in
           Deferred.any_unit [
-            react () ;
+            assemble_frames () ;
             Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
           ]
         end

@@ -6,22 +6,27 @@
 open Core
 open Async
 open Httpaf
-
 open Fastws
+
+type t =
+  | Header of Fastws.t
+  | Payload of Bigstringaf.t
 
 val connect :
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
   Uri.t ->
-  (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
+  handle:(t -> unit Deferred.t) ->
+  t Pipe.Writer.t Deferred.t
 
 val with_connection :
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
   Uri.t ->
-  f:(t Pipe.Reader.t -> t Pipe.Writer.t -> 'a Deferred.t) ->
+  handle:(t -> unit Deferred.t) ->
+  f:(t Pipe.Writer.t -> 'a Deferred.t) ->
   'a Deferred.t
 
 exception Timeout of Int63.t
