@@ -121,24 +121,25 @@ let connect
       Logs_async.debug ~src
         (fun m -> m "Connected to %a" Uri.pp_hum uri) >>= fun () ->
       don't_wait_for begin
-        let current_header = ref None in
-        Pipe.iter ws_r ~f:begin function
+        Pipe.fold ws_r ~f:begin fun hdr -> function
           | Header t ->
             let mask = Crypto.(to_string (generate 4)) in
             let h = { t with mask = Some mask } in
-            current_header := Some h ;
             serialize stream h ;
             flush () >>= fun () ->
-            Logs_async.debug ~src (fun m -> m "-> %a" pp t)
+            Logs_async.debug ~src (fun m -> m "-> %a" pp t) >>| fun () ->
+            Some h
           | Payload buf ->
-            match !current_header with
+            match hdr with
             | Some { mask = Some mask ; _ } ->
               xormask ~mask buf ;
               Faraday.write_bigstring stream buf ;
-              flush ()
+              flush () >>| fun () ->
+              hdr
             | _ ->
               failwith "current header must exist"
-        end
+        end ~init:None >>= fun _ ->
+        Deferred.unit
       end ;
       let len_to_read = ref 0 in
       let handle_chunk buf ~pos ~len =
@@ -180,65 +181,83 @@ let with_connection ?stream ?crypto ?extra_headers uri ~handle ~f =
 
 exception Timeout of Int63.t
 
-let handle client_w ws_w last_pong =
-  let buf = Bigbuffer.create 13 in
-  let cont = ref `No in
-  let current_header = ref None in
-  let bytes_to_read = ref 0 in
-  function
-  | Payload b when !cont = `No ->
-    Pipe.write client_w (Bigstring.to_string b)
-  | Payload b when !cont = `End ->
-    cont := `No ;
-    Bigbuffer.add_bigstring buf b ;
-    Pipe.write client_w (Bigbuffer.contents buf)
-  | Payload b ->
-    Bigbuffer.add_bigstring buf b ;
+type st = {
+  buf : Bigbuffer.t ;
+  mutable header : Fastws.t option ;
+}
+
+let st () = {
+  buf = Bigbuffer.create 13 ;
+  header = None ;
+}
+
+let reassemble k st t =
+  match t, st.header with
+  | Header { opcode; final; _ }, Some { final = false ; _ } when
+      final && opcode <> Continuation ->
+    k st (`Fail "unfinished continuation")
+  | Header { opcode = Continuation ; length ; final ; _ }, Some h ->
+    st.header <- Some { h with length ; final } ;
+    k st `Continue
+  | Header h, _ ->
+    st.header <- Some h ;
+    k st `Continue
+  | Payload _, None -> k st (`Fail "payload without a header")
+  | Payload b, Some h ->
+    begin match Bigstring.length b, h.final with
+      | len, false ->
+        Bigbuffer.add_bigstring st.buf b ;
+        begin match st.header with
+        | None -> assert false
+        | Some h ->
+          st.header <- Some { h with length = h.length - len }
+        end ;
+        k st `Continue
+      | _, true ->
+        Bigbuffer.add_bigstring st.buf b ;
+        st.header <- None ;
+        Bigbuffer.clear st.buf ;
+        k st (`Frame (h.opcode, (Bigbuffer.contents st.buf)))
+    end
+
+let process last_pong client_w ws_w (({ opcode ; _ } as fr), data) =
+  let write_ws hdr data =
+    let datalen = match data with
+      | None -> 0
+      | Some buf -> Bigstringaf.length buf in
+    Pipe.write ws_w
+      (Header { hdr with length = datalen }) >>= fun () ->
+    begin match data with
+      | None -> Deferred.unit
+      | Some data -> Pipe.write ws_w (Payload data)
+    end in
+  let write_client = function
+    | None -> Deferred.unit
+    | Some data -> Pipe.write client_w (Bigstring.to_string data) in
+  match opcode with
+  | Ping -> write_ws pong data
+  | Close -> write_ws fr data
+  | Pong ->
+    last_pong := Time_stamp_counter.now () ;
     Deferred.unit
-  | Header h ->
-    current_header := Some h ;
-    bytes_to_read := h.length ;
-    match h with
-    | { opcode = Ping ; _ } ->
-      Pipe.write ws_w pong
-    | ({ opcode = Close ; _ } as fr) ->
-      Pipe.write ws_w fr >>| fun () ->
-      Pipe.close ws_w ;
-      Pipe.close client_w
-    | { opcode = Pong ; _ } ->
-      last_pong := Time_stamp_counter.now () ;
-      Deferred.unit
-    | { opcode = Continuation ; final = true ; _ } ->
-      cont := `End ;
-      Deferred.unit
-    | { opcode = Continuation ; _ } ->
-      cont := `Yes ;
-      Deferred.unit
-    | { opcode = Text ; _ }
-    | { opcode = Binary ; _ } when h.final ->
-      Deferred.unit
-    | Text
-    | Binary when not !cont ->
-      cont := true ;
-      Buffer.clear buf ;
-      Buffer.add_string buf fr.content ;
-      return None
-    | Text
-    | Binary ->
-      let close_msg =
-        close ~msg:begin
-          Status.ProtocolError,
-          "Fragmented message ongoing"
-        end () in
-      Pipe.write w close_msg >>| fun () ->
-      Pipe.close w ;
-      None
-    | _ ->
-      let close_msg =
-        close ~msg:(Status.UnsupportedExtension, "") () in
-      Pipe.write w close_msg >>| fun () ->
-      Pipe.close w ;
-      None
+  (* | { opcode = Text ; _ }
+   * | { opcode = Binary ; _ } when h.final && !cont <> `No ->
+   *   let fr =
+   *     close ~msg:begin
+   *       Status.ProtocolError,
+   *       "Fragmented message ongoing"
+   *     end () in
+   *   Pipe.write ws_w fr >>| fun () ->
+   *   Pipe.close ws_w ;
+   *   Pipe.close client_w *)
+  | Text
+  | Binary -> write_client data
+  | Continuation -> assert false
+  | _ ->
+    let hdr, _ = close ~msg:(Status.UnsupportedExtension, "") () in
+    write_ws hdr None >>| fun () ->
+    Pipe.close ws_w ;
+    Pipe.close client_w
 
 let connect_ez
     ?(crypto=(module Crypto : CRYPTO))
