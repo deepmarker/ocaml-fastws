@@ -144,35 +144,40 @@ let show t = Format.asprintf "%a" pp t
 let create ?(rsv=0) ?(final=true) ?(length=0) ?mask opcode =
   { opcode ; rsv ; final ; length ; mask }
 
-let ping = create Opcode.Ping
-let pong = create Opcode.Pong
+type frame = {
+  header : t ;
+  payload : Bigstringaf.t option
+}
 
-let pingf fmt =
-  Format.kasprintf (fun content -> create Opcode.Ping, content) fmt
-let pongf fmt =
-  Format.kasprintf (fun content -> create Opcode.Pong, content) fmt
+let kcreate opcode content =
+  match String.length content with
+  | 0 -> { header = create opcode ; payload = None }
+  | len ->
+    let content = Bigstringaf.of_string ~off:0 ~len content in
+    { header = create ~length:(Bigstringaf.length content) opcode ;
+      payload = Some content }
 
-let close ?msg () =
-  match msg with
-  | None -> create Opcode.Close, None
-  | Some (status, msg) ->
-    let msglen = String.length msg in
-    let content = Bytes.create (2 + msglen) in
-    EndianBytes.BigEndian.set_int16 content 0 (Status.to_int status) ;
-    Bytes.blit_string msg 0 content 2 msglen ;
-    let content = Bytes.unsafe_to_string content in
-    create Opcode.Close, Some content
+let createf ?(content="") opcode = kcreate opcode content
 
-let closef status =
-  Format.kasprintf (fun msg -> close ~msg:(status, msg) ())
+let pingf fmt = Format.kasprintf (kcreate Ping) fmt
+let pongf fmt = Format.kasprintf (kcreate Pong) fmt
+let textf fmt = Format.kasprintf (kcreate Text) fmt
+let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
+
+let close status msg =
+  let msglen = String.length msg in
+  let content = Bigstringaf.create (2 + msglen) in
+  Bigstringaf.set_int16_be content 0 (Status.to_int status) ;
+  Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen ;
+  { header = create Close ; payload = Some content }
+
+let closef status = Format.kasprintf (close status)
 
 let get_finmask c = Char.code c land 0x80 <> 0
 let get_rsv c = (Char.code c lsr 4) land 0x7
 let get_len c = Char.code c land 0x7f
 let get_opcode c = Opcode.of_int (Char.code c land 0xf)
-
-let xor_char a b =
-  Char.(chr (code a lxor code b))
+let xor_char a b = Char.(chr (code a lxor code b))
 
 (* let xormask ~mask buf =
  *   Bytes.iteri begin fun i c ->

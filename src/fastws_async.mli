@@ -16,17 +16,17 @@ val connect :
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
+  handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   Uri.t ->
-  handle:(t -> unit Deferred.t) ->
   t Pipe.Writer.t Deferred.t
 
 val with_connection :
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
-  Uri.t ->
-  handle:(t -> unit Deferred.t) ->
+  handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   f:(t Pipe.Writer.t -> 'a Deferred.t) ->
+  Uri.t ->
   'a Deferred.t
 
 exception Timeout of Int63.t

@@ -11,7 +11,7 @@ open Fastws
 
 type t =
   | Header of Fastws.t
-  | Payload of Bigstringaf.t
+  | Payload of Bigstring.t
 
 let src =
   Logs.Src.create "fastws.async"
@@ -146,7 +146,8 @@ let connect
         if !len_to_read > 0 then begin
           let will_read = min len !len_to_read in
           len_to_read := !len_to_read - will_read ;
-          handle (Payload (Bigstringaf.sub buf ~off:pos ~len)) >>= fun () ->
+          handle client_w
+            (Payload (Bigstringaf.sub buf ~off:pos ~len)) >>= fun () ->
           return (`Consumed (will_read, `Need !len_to_read))
         end
         else
@@ -155,7 +156,7 @@ let connect
             return (`Consumed (0, `Need (len + n)))
           | `Ok (t, read) ->
             Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
-            handle (Header t) >>= fun () ->
+            handle client_w (Header t) >>= fun () ->
             len_to_read := t.length ;
             return (`Consumed (read, `Need t.length))
       in
@@ -175,7 +176,7 @@ let connect
   Ivar.read initialized >>| fun () ->
   client_w
 
-let with_connection ?stream ?crypto ?extra_headers uri ~handle ~f =
+let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
   connect ?stream ?extra_headers ?crypto ~handle uri >>= fun w ->
   protect ~f:(fun () -> f w) ~finally:(fun () -> Pipe.close w)
 
@@ -186,7 +187,7 @@ type st = {
   mutable header : Fastws.t option ;
 }
 
-let st () = {
+let create_st () = {
   buf = Bigbuffer.create 13 ;
   header = None ;
 }
@@ -199,6 +200,9 @@ let reassemble k st t =
   | Header { opcode = Continuation ; length ; final ; _ }, Some h ->
     st.header <- Some { h with length ; final } ;
     k st `Continue
+  | Header ({ length = 0 ; final = true ; _ } as h), _ ->
+    st.header <- None ;
+    k st (`Frame { header = h ; payload = None })
   | Header h, _ ->
     st.header <- Some h ;
     k st `Continue
@@ -208,54 +212,40 @@ let reassemble k st t =
       | len, false ->
         Bigbuffer.add_bigstring st.buf b ;
         begin match st.header with
-        | None -> assert false
-        | Some h ->
-          st.header <- Some { h with length = h.length - len }
+          | None -> assert false
+          | Some h ->
+            st.header <- Some { h with length = h.length - len }
         end ;
         k st `Continue
       | _, true ->
         Bigbuffer.add_bigstring st.buf b ;
         st.header <- None ;
         Bigbuffer.clear st.buf ;
-        k st (`Frame (h.opcode, (Bigbuffer.contents st.buf)))
+        k st (`Frame { header  = h ;
+                       payload = Some (Bigbuffer.volatile_contents st.buf) })
     end
 
-let process last_pong client_w ws_w (({ opcode ; _ } as fr), data) =
-  let write_ws hdr data =
-    let datalen = match data with
-      | None -> 0
-      | Some buf -> Bigstringaf.length buf in
-    Pipe.write ws_w
-      (Header { hdr with length = datalen }) >>= fun () ->
-    begin match data with
-      | None -> Deferred.unit
-      | Some data -> Pipe.write ws_w (Payload data)
-    end in
+let process last_pong client_w ws_w ({ header ; payload } as frame) =
+  let write_ws = function
+    | { header ; payload = None } -> Pipe.write ws_w (Header header)
+    | { header ; payload = Some payload } ->
+      Pipe.write ws_w (Header header)  >>= fun () ->
+      Pipe.write ws_w (Payload payload) in
   let write_client = function
-    | None -> Deferred.unit
-    | Some data -> Pipe.write client_w (Bigstring.to_string data) in
-  match opcode with
-  | Ping -> write_ws pong data
-  | Close -> write_ws fr data
+    | { payload = None ; _ } -> Deferred.unit
+    | { payload = Some payload ; _ } ->
+      Pipe.write client_w (Bigstring.to_string payload) in
+  match header.opcode with
+  | Ping -> write_ws { header = { header with opcode = Pong } ; payload }
+  | Close -> write_ws frame
   | Pong ->
     last_pong := Time_stamp_counter.now () ;
     Deferred.unit
-  (* | { opcode = Text ; _ }
-   * | { opcode = Binary ; _ } when h.final && !cont <> `No ->
-   *   let fr =
-   *     close ~msg:begin
-   *       Status.ProtocolError,
-   *       "Fragmented message ongoing"
-   *     end () in
-   *   Pipe.write ws_w fr >>| fun () ->
-   *   Pipe.close ws_w ;
-   *   Pipe.close client_w *)
   | Text
-  | Binary -> write_client data
+  | Binary -> write_client frame
   | Continuation -> assert false
   | _ ->
-    let hdr, _ = close ~msg:(Status.UnsupportedExtension, "") () in
-    write_ws hdr None >>| fun () ->
+    write_ws (closef Status.UnsupportedExtension "") >>| fun () ->
     Pipe.close ws_w ;
     Pipe.close client_w
 
@@ -284,16 +274,17 @@ let connect_ez
     Time_stamp_counter.Calibrator.calibrate ;
   let client_read_iv = Ivar.create () in
   let handle =
-    let st = st () in
-    let  () =
-      reassemble begin fun st -> function
+    let state = ref (create_st ()) in
+    let inner w t =
+      reassemble begin fun st s ->
+        state := st ;
+        match s with
         | `Fail msg -> failwith msg
-        | `Continue -> handle st
-        | `Frame (hdr, data) ->
-      end st t in
-    fun t ->
-
-      don't_wait_for begin
+        | `Continue -> Deferred.unit
+        | `Frame fr -> process last_pong ws_write w fr
+      end !state t in
+    fun w t -> inner w t in
+  don't_wait_for begin
     Monitor.protect ~here:[%here]
       ~finally:(fun () -> cleanup () ; Deferred.unit)
       begin fun () ->
@@ -304,7 +295,7 @@ let connect_ez
             | Some span ->
               let send_ping () =
                 let now = Time_stamp_counter.now () in
-                Pipe.write w (Header ping) >>= fun () ->
+                Pipe.write w (Header (create Ping)) >>= fun () ->
                 let elapsed = Time_stamp_counter.diff now !last_pong in
                 let elapsed = Time_stamp_counter.Span.to_ns elapsed in
                 if Int63.(elapsed < span + span) then Deferred.unit

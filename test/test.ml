@@ -7,18 +7,18 @@ let () =
   Logs.set_reporter (Logs_async_reporter.reporter ())
 
 let frames = [
-  "empty text"        , create Opcode.Text ;
-  "text with content" , create ~content:"test" Opcode.Text ;
-  "empty continution" , create Opcode.Continuation ;
-  "ping", create Opcode.Ping ;
-  "pong", create Opcode.Pong ;
-  "empty close", close () ;
-  "close", close ~msg:(Status.NormalClosure, "bleh") () ;
-  "unfinished cont", create ~final:false Opcode.Continuation ;
-  "text with rsv", create ~final:false ~rsv:7 Opcode.Text ;
-  "empty binary", create ~final:false Opcode.Binary ;
-  "text 125", create ~content:(Crypto.generate 125) Opcode.Text ;
-  "binary 125", create ~content:(Crypto.generate 125) Opcode.Binary ;
+  "empty text"        , textf "" ;
+  "text with content" , textf "test" ;
+  "empty continution" , createf Continuation ;
+  "ping", createf Ping ;
+  "pong", createf Pong ;
+  "empty close", createf Close ;
+  "close", closef Status.NormalClosure "bleh" ;
+  "unfinished cont", { header = create ~final:false Continuation ; payload = None } ;
+  "text with rsv", { header = create ~final:false ~rsv:7 Text ; payload = None } ;
+  "empty binary", { header = create ~final:false Binary ; payload = None } ;
+  "text 125", textf "%s" (Crypto.generate 125) ;
+  "binary 125", binaryf "%s" (Crypto.generate 125) ;
   "text 126", create ~content:(Crypto.generate 126) Opcode.Text ;
   "binary 126", create ~content:(Crypto.generate 126) Opcode.Binary ;
   "binary 65536", create ~content:(Crypto.generate (1 lsl 16)) Opcode.Binary ;

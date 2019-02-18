@@ -76,19 +76,19 @@ val show : t -> string
 val create :
   ?rsv:int -> ?final:bool -> ?length:int -> ?mask:string -> Opcode.t -> t
 
-val ping : t
-val pingf : ('a, Format.formatter, unit, t * string) format4 -> 'a
+type frame = {
+  header : t ;
+  payload : Bigstringaf.t option
+}
 
-val pong : t
-val pongf : ('a, Format.formatter, unit, t * string) format4 -> 'a
-
-val close : ?msg:(Status.t * string) -> unit -> t * string option
-val closef :
-  Status.t -> ('a, Format.formatter, unit, t * string option) format4 -> 'a
-
+val createf : ?content:string -> Opcode.t -> frame
+val pingf   : ('a, Format.formatter, unit, frame) format4 -> 'a
+val pongf   : ('a, Format.formatter, unit, frame) format4 -> 'a
+val textf   : ('a, Format.formatter, unit, frame) format4 -> 'a
+val binaryf : ('a, Format.formatter, unit, frame) format4 -> 'a
+val closef  : Status.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
 val xormask : mask:string -> Bigstringaf.t -> unit
 
 type parse_result = [`More of int | `Ok of t * int]
 val parse : Bigstringaf.t -> pos:int -> len:int -> parse_result
-
 val serialize : Faraday.t -> t -> unit
