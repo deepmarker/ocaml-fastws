@@ -1,4 +1,4 @@
-(* open Async *)
+open Async
 open Alcotest
 open Fastws
 
@@ -31,7 +31,17 @@ let multiframes = [
   "double close", [closef "" ; closef ""] ;
 ]
 
-let frame = testable pp_frame (=)
+let frame =
+  testable pp_frame begin fun a b ->
+    match a, b with
+    | { header ; payload = None},
+      { header = header' ; payload = None } ->
+      header = header'
+    | { header ; payload = Some p},
+      { header = header' ; payload = Some p' } ->
+      header = header' && p = p'
+    | _ -> false
+  end
 
 let filter_map f l =
   List.fold_right
@@ -75,36 +85,59 @@ let roundtrip ?mask descr frames () =
     check frame descr { f with header = { f.header with mask } } f'
   end frames frames'
 
-(* let connect () =
- *   let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" () in
- *   let frame = create ~content:"msg" Text in
- *   Fastws_async.connect url >>= begin fun (r, w) ->
- *     Pipe.write w frame >>= fun () ->
- *     Pipe.read r >>= function
- *     | `Eof -> failwith "did not receive echo"
- *     | `Ok fr when fr = frame -> begin
- *         (\* let close_fr = close () in
- *          * Pipe.write w close_fr >>= fun () ->
- *          * Pipe.read r >>= function
- *          * | `Eof -> failwith "did not receive close echo"
- *          * | `Ok fr when fr = close_fr ->
- *          *   Pipe.close w ;
- *          *   Pipe.close_read r ; *\)
- *         Deferred.unit
- *         (\* | _ -> failwith "close frame has been altered" *\)
- *       end
- *     | `Ok _ -> failwith "message has been altered"
- *   end
- * 
- * let with_connection_ez () =
- *   let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" () in
- *   Fastws_async.with_connection_ez url ~f:begin fun r w ->
- *     Pipe.write w "msg" >>= fun () ->
- *     Pipe.read r >>= function
- *     | `Eof -> failwith "did not receive echo"
- *     | `Ok "msg" -> Deferred.unit
- *     | `Ok _ -> failwith "message has been altered"
- *   end *)
+let connect_f mv w =
+  let open Fastws_async in
+  let msg = text "msg" in
+  write_frame w msg >>= fun () ->
+  Mvar.take mv >>= fun header ->
+  Mvar.take mv >>= fun payload ->
+  write_frame w (close "") >>= fun () ->
+  Mvar.take mv >>| fun _cl ->
+  match header, payload with
+  | Header header, Payload payload ->
+    let msg' = { header ; payload = Some payload } in
+    check frame "" msg msg'
+  | _ -> failwith "wrong message sequence"
+
+let handle_incoming_frame mv _w = function
+  | Fastws_async.Header _ as fr ->
+    Mvar.put mv fr
+  | Payload pld ->
+    Mvar.put mv (Payload (Bigstringaf.(copy pld ~off:0 ~len:(length pld))))
+
+let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ()
+
+let connect () =
+  let mv = Mvar.create () in
+  Fastws_async.connect ~handle:(handle_incoming_frame mv) url >>=
+  connect_f mv
+
+let with_connection () =
+  let mv = Mvar.create () in
+  Fastws_async.with_connection url
+    ~handle:(handle_incoming_frame mv)
+    ~f:(connect_f mv)
+
+let connect_ez () =
+  Fastws_async.connect_ez url >>= fun (r, w, terminated) ->
+  let msg = "msg" in
+  Pipe.write w msg >>= fun () ->
+  Pipe.read r >>= fun res ->
+  Pipe.close w ;
+  Pipe.close_read r ;
+  terminated >>| fun () ->
+  match res with
+  | `Eof -> failwith "did not receive echo"
+  | `Ok msg' -> check string "" msg msg'
+
+let with_connection_ez () =
+  Fastws_async.with_connection_ez url ~f:begin fun r w ->
+    Pipe.write w "msg" >>= fun () ->
+    Pipe.read r >>= function
+    | `Eof -> failwith "did not receive echo"
+    | `Ok "msg" -> Deferred.unit
+    | `Ok _ -> failwith "message has been altered"
+  end
 
 let roundtrip_unmasked =
   List.map
@@ -126,10 +159,12 @@ let roundtrip_masked_multi =
     n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
   end multiframes
 
-(* let async = Alcotest_async.[
- *     test_case "connect" `Quick connect ;
- *     test_case "with_connection_ez" `Quick with_connection_ez ;
- *   ] *)
+let async = Alcotest_async.[
+    (* test_case "connect" `Quick connect ;
+     * test_case "with_connection" `Quick with_connection ; *)
+    test_case "connect_ez" `Quick connect_ez ;
+    (* test_case "with_connection_ez" `Quick with_connection_ez ; *)
+  ]
 
 let () =
   Alcotest.run "fastws" [
@@ -137,6 +172,6 @@ let () =
     "roundtrip_masked", roundtrip_masked ;
     "roundtrip_multi", roundtrip_unmasked_multi ;
     "roundtrip_masked_multi", roundtrip_masked_multi ;
-    (* "async", async ; *)
+    "async", async ;
   ]
 

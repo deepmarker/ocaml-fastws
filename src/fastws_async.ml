@@ -9,12 +9,21 @@ open Httpaf
 
 open Fastws
 
+let src =
+  Logs.Src.create "fastws.async"
+
 type t =
   | Header of Fastws.t
   | Payload of Bigstring.t
 
-let src =
-  Logs.Src.create "fastws.async"
+let header = function Header _ -> true | _ -> false
+(* let payload = function Payload _ -> true | _ -> false *)
+
+let write_frame w { header ; payload } =
+  Pipe.write w (Header header) >>= fun () ->
+  match payload with
+  | None -> Deferred.unit
+  | Some payload -> Pipe.write w (Payload payload)
 
 let merge_headers h1 h2 =
   Headers.fold ~init:h2 ~f:begin fun k v a ->
@@ -134,6 +143,7 @@ let connect
             | Some { mask = Some mask ; _ } ->
               xormask ~mask buf ;
               Faraday.write_bigstring stream buf ;
+              xormask ~mask buf ;
               flush () >>| fun () ->
               hdr
             | _ ->
@@ -142,23 +152,32 @@ let connect
         Deferred.unit
       end ;
       let len_to_read = ref 0 in
+      let need = function
+        | 0 -> `Need_unknown
+        | n -> `Need n in
       let handle_chunk buf ~pos ~len =
-        if !len_to_read > 0 then begin
+        Logs_async.debug
+          (fun m -> m "handle_chunk %d %d" pos len) >>= fun () ->
+        let read_max already_read =
           let will_read = min len !len_to_read in
           len_to_read := !len_to_read - will_read ;
-          handle client_w
-            (Payload (Bigstringaf.sub buf ~off:pos ~len)) >>= fun () ->
-          return (`Consumed (will_read, `Need !len_to_read))
-        end
-        else
+          let payload = Bigstringaf.sub buf
+              ~off:(pos+already_read) ~len:(len-already_read) in
+          handle client_w (Payload payload) >>= fun () ->
+          Logs_async.debug
+            (fun m -> m "consumed %d %d" (already_read + will_read) !len_to_read) >>= fun () ->
+          return (`Consumed (already_read + will_read, need !len_to_read)) in
+        if !len_to_read > 0 then read_max 0 else
           match parse buf ~pos ~len with
-          | `More n ->
-            return (`Consumed (0, `Need (len + n)))
+          | `More n -> return (`Consumed (0, `Need (len + n)))
           | `Ok (t, read) ->
             Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
             handle client_w (Header t) >>= fun () ->
             len_to_read := t.length ;
-            return (`Consumed (read, `Need t.length))
+            if read < len then
+              read_max read
+            else
+              return (`Consumed (len, `Need_unknown))
       in
       Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
       | `Stopped _ ->
@@ -166,7 +185,7 @@ let connect
         Deferred.unit
       | `Eof
       | `Eof_with_unconsumed_data _ ->
-        raise End_of_file
+        Deferred.unit
   in
   don't_wait_for begin
     Monitor.protect ~here:[%here]
@@ -178,7 +197,8 @@ let connect
 
 let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
   connect ?stream ?extra_headers ?crypto ~handle uri >>= fun w ->
-  protect ~f:(fun () -> f w) ~finally:(fun () -> Pipe.close w)
+  Monitor.protect (fun () -> f w)
+    ~finally:(fun () -> Pipe.close w ; Pipe.closed w)
 
 exception Timeout of Int63.t
 
@@ -193,6 +213,7 @@ let create_st () = {
 }
 
 let reassemble k st t =
+  if header t then Bigbuffer.clear st.buf ;
   match t, st.header with
   | Header { opcode; final; _ }, Some { final = false ; _ } when
       final && opcode <> Continuation ->
@@ -208,36 +229,38 @@ let reassemble k st t =
     k st `Continue
   | Payload _, None -> k st (`Fail "payload without a header")
   | Payload b, Some h ->
-    begin match Bigstring.length b, h.final with
-      | len, false ->
-        Bigbuffer.add_bigstring st.buf b ;
-        begin match st.header with
-          | None -> assert false
-          | Some h ->
-            st.header <- Some { h with length = h.length - len }
-        end ;
-        k st `Continue
-      | _, true ->
-        Bigbuffer.add_bigstring st.buf b ;
-        st.header <- None ;
-        Bigbuffer.clear st.buf ;
-        k st (`Frame { header  = h ;
-                       payload = Some (Bigbuffer.volatile_contents st.buf) })
+    if not h.final then begin
+      Bigbuffer.add_bigstring st.buf b ;
+      begin match st.header with
+        | None -> assert false
+        | Some h ->
+          st.header <- Some { h with length = h.length - Bigstring.length b }
+      end ;
+      k st `Continue
+    end
+    else begin
+      Bigbuffer.add_bigstring st.buf b ;
+      st.header <- None ;
+      let payload = Bigbuffer.volatile_contents st.buf in
+      let payload = Bigstring.sub_shared ~len:h.length payload in
+      k st (`Frame { header  = h ; payload = Some payload })
     end
 
-let process last_pong client_w ws_w ({ header ; payload } as frame) =
-  let write_ws = function
-    | { header ; payload = None } -> Pipe.write ws_w (Header header)
-    | { header ; payload = Some payload } ->
-      Pipe.write ws_w (Header header)  >>= fun () ->
-      Pipe.write ws_w (Payload payload) in
+let process
+    cleaning_up cleaned_up last_pong client_w ws_w ({ header ; payload } as frame) =
   let write_client = function
     | { payload = None ; _ } -> Deferred.unit
     | { payload = Some payload ; _ } ->
       Pipe.write client_w (Bigstring.to_string payload) in
   match header.opcode with
-  | Ping -> write_ws { header = { header with opcode = Pong } ; payload }
-  | Close -> write_ws frame
+  | Ping ->
+    write_frame ws_w { header = { header with opcode = Pong } ; payload }
+  | Close ->
+    begin if Ivar.is_empty cleaning_up then
+        write_frame ws_w frame
+      else Deferred.unit
+    end >>| fun () ->
+    Ivar.fill_if_empty cleaned_up ()
   | Pong ->
     last_pong := Time_stamp_counter.now () ;
     Deferred.unit
@@ -245,7 +268,7 @@ let process last_pong client_w ws_w ({ header ; payload } as frame) =
   | Binary -> write_client frame
   | Continuation -> assert false
   | _ ->
-    write_ws (closef ~status:Status.UnsupportedExtension "") >>| fun () ->
+    write_frame ws_w (close ~status:Status.UnsupportedExtension "") >>| fun () ->
     Pipe.close ws_w ;
     Pipe.close client_w
 
@@ -257,17 +280,11 @@ let connect_ez
     uri =
   let ws_read, client_write = Pipe.create () in
   let client_read, ws_write = Pipe.create () in
+  let cleaning_up = Ivar.create () in
   let cleaned_up = Ivar.create () in
   let last_pong = ref (Time_stamp_counter.now ()) in
-  let cleanup ?rw () =
-    begin match rw with
-      | None -> ()
-      | Some (r, w) ->
-        Pipe.close_read r ;
-        Pipe.close w
-    end ;
-    Pipe.close_read ws_read ;
-    Ivar.fill_if_empty cleaned_up () in
+  let cleanup () =
+    Pipe.close_read ws_read in
   Clock_ns.every
     ~stop:(Ivar.read cleaned_up)
     (Time_ns.Span.of_int_sec 60)
@@ -281,64 +298,79 @@ let connect_ez
         match s with
         | `Fail msg -> failwith msg
         | `Continue -> Deferred.unit
-        | `Frame fr -> process last_pong ws_write w fr
+        | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
       end !state t in
     fun w t -> inner w t in
   don't_wait_for begin
-    Monitor.protect ~here:[%here]
-      ~finally:(fun () -> cleanup () ; Deferred.unit)
-      begin fun () ->
-        with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
-          let m = Monitor.current () in
-          begin match hb_ns with
-            | None -> ()
-            | Some span ->
-              let send_ping () =
-                let now = Time_stamp_counter.now () in
-                Pipe.write w (Header (create Ping)) >>= fun () ->
-                let elapsed = Time_stamp_counter.diff now !last_pong in
-                let elapsed = Time_stamp_counter.Span.to_ns elapsed in
-                if Int63.(elapsed < span + span) then Deferred.unit
-                else begin
-                  Logs_async.warn ~src begin fun m ->
-                    m "No pong received to ping request after %a ns, closing"
-                      Int63.pp elapsed
-                  end >>| fun () ->
-                  Monitor.send_exn m (Timeout elapsed)
-                end
-              in
-              Clock_ns.run_at_intervals'
-                ~continue_on_error:false
-                ~stop:(Ivar.read cleaned_up)
-                (Time_ns.Span.of_int63_ns span)
-                send_ping
-          end ;
-          Ivar.fill client_read_iv client_read ;
-          let assemble_frames () =
-            let opcode = if binary then Opcode.Binary else Text in
-            Pipe.transfer' ws_read w ~f:begin fun mq ->
-              let wq = Queue.create () in
-              Queue.iter mq ~f:begin fun m ->
-                  Queue.enqueue wq (Header (create opcode)) ;
-                  Queue.enqueue wq (Payload (Bigstring.of_string m)) ;
-              end ;
-              return wq
-            end
-          in
-          Deferred.any_unit [
-            assemble_frames () ;
-            Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
-          ]
-        end
+    Monitor.try_with ~here:[%here] begin fun () ->
+      with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
+        let m = Monitor.current () in
+        begin match hb_ns with
+          | None -> ()
+          | Some span ->
+            let send_ping () =
+              let now = Time_stamp_counter.now () in
+              Pipe.write w (Header (create Ping)) >>= fun () ->
+              let elapsed = Time_stamp_counter.diff now !last_pong in
+              let elapsed = Time_stamp_counter.Span.to_ns elapsed in
+              if Int63.(elapsed < span + span) then Deferred.unit
+              else begin
+                Logs_async.warn ~src begin fun m ->
+                  m "No pong received to ping request after %a ns, closing"
+                    Int63.pp elapsed
+                end >>| fun () ->
+                Monitor.send_exn m (Timeout elapsed)
+              end
+            in
+            Clock_ns.run_at_intervals'
+              ~continue_on_error:false
+              ~stop:(Ivar.read cleaned_up)
+              (Time_ns.Span.of_int63_ns span)
+              send_ping
+        end ;
+        Ivar.fill client_read_iv client_read ;
+        let assemble_frames () =
+          let wq = Queue.create () in
+          Pipe.transfer' ws_read w ~f:begin fun mq ->
+            Queue.clear wq ;
+            Queue.iter mq ~f:begin fun m ->
+              let { header ; payload } = match binary with
+                | true -> Fastws.binary m
+                | false -> Fastws.text m in
+              Queue.enqueue wq (Header header) ;
+              match payload with
+              | None -> ()
+              | Some payload -> Queue.enqueue wq (Payload payload)
+            end ;
+            return wq
+          end
+        in
+        Deferred.any_unit [
+          assemble_frames () ;
+          Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
+        ] >>= fun () ->
+        write_frame w (close "") >>= fun () ->
+        Ivar.fill_if_empty cleaning_up () ;
+        Ivar.read cleaned_up
       end
+    end >>= function
+    | Error exn ->
+      Logs_async.err ~src (fun m -> m "%a" Exn.pp exn) >>= fun () ->
+      cleanup () ;
+      Ivar.fill_if_empty cleaned_up () ;
+      Deferred.unit
+    | Ok () ->
+      cleanup () ;
+      Deferred.unit
   end ;
   Ivar.read client_read_iv >>| fun client_read ->
-  client_read, client_write
+  client_read, client_write, Ivar.read cleaned_up
 
 let with_connection_ez
     ?(crypto=(module Crypto : CRYPTO))
     ?binary ?extra_headers ?hb_ns uri ~f =
-  connect_ez ?binary ?extra_headers ?hb_ns ~crypto uri >>= fun (r, w) ->
+  connect_ez
+    ?binary ?extra_headers ?hb_ns ~crypto uri >>= fun (r, w, cleaned_up) ->
   Monitor.protect ~here:[%here]
-    ~finally:(fun () -> Pipe.close_read r ; Pipe.close w ; Deferred.unit)
+    ~finally:(fun () -> Pipe.close_read r ; Pipe.close w ; cleaned_up)
     (fun () -> f r w)

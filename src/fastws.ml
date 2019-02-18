@@ -149,8 +149,13 @@ type frame = {
   payload : Bigstringaf.t option ;
 }
 
-let pp_frame ppf { header ; _ } =
-  Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t header)
+let pp_frame ppf = function
+  | { header ; payload = None } ->
+    Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t header)
+  | { header ; payload = Some payload } ->
+    Format.fprintf ppf "%a [%S]"
+      Sexplib.Sexp.pp (sexp_of_t header)
+      Bigstringaf.(substring payload ~off:0 ~len:(length payload))
 
 let kcreate opcode content =
   match String.length content with
@@ -160,21 +165,37 @@ let kcreate opcode content =
     { header = create ~length:(Bigstringaf.length content) opcode ;
       payload = Some content }
 
+let text msg = kcreate Text msg
+let binary msg = kcreate Binary msg
+
 let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
 let pingf fmt = Format.kasprintf (kcreate Ping) fmt
 let pongf fmt = Format.kasprintf (kcreate Pong) fmt
 let textf fmt = Format.kasprintf (kcreate Text) fmt
 let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
 
-let close status msg =
+let kclose status msg =
   let msglen = String.length msg in
   let content = Bigstringaf.create (2 + msglen) in
   Bigstringaf.set_int16_be content 0 (Status.to_int status) ;
   Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen ;
   { header = create ~length:(2 + msglen) Close ; payload = Some content }
 
+let close ?(status=Status.NormalClosure) msg =
+  kclose status msg
+
 let closef ?(status=Status.NormalClosure) fmt =
-  Format.kasprintf (close status) fmt
+  Format.kasprintf (kclose status) fmt
+
+let is_binary = function
+  | { header = { opcode = Binary ; _ } ; _ } -> true
+  | _ -> false
+let is_text = function
+  | { header = { opcode = Text ; _ } ; _ } -> true
+  | _ -> false
+let is_close = function
+  | { header = { opcode = Close ; _ } ; _ } -> true
+  | _ -> false
 
 let get_finmask c = Char.code c land 0x80 <> 0
 let get_rsv c = (Char.code c lsr 4) land 0x7
@@ -189,7 +210,7 @@ let xor_char a b = Char.(chr (code a lxor code b))
 
 let xormask ~mask buf =
   let open Bigstringaf in
-  for i = 0 to length buf do
+  for i = 0 to length buf - 1 do
     set buf i (xor_char (get buf i) (String.get mask (i mod 4)))
   done
 

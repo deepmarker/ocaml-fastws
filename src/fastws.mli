@@ -82,6 +82,14 @@ type frame = {
 }
 val pp_frame : Format.formatter -> frame -> unit
 
+val text    : string -> frame
+val binary  : string -> frame
+val close   : ?status:Status.t -> string -> frame
+
+val is_text   : frame -> bool
+val is_binary : frame -> bool
+val is_close  : frame -> bool
+
 val createf : Opcode.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
 val pingf   : ('a, Format.formatter, unit, frame) format4 -> 'a
 val pongf   : ('a, Format.formatter, unit, frame) format4 -> 'a
