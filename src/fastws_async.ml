@@ -283,7 +283,17 @@ let connect_ez
     (Time_ns.Span.of_int_sec 60)
     Time_stamp_counter.Calibrator.calibrate ;
   let client_read_iv = Ivar.create () in
-  don't_wait_for begin
+  let handle =
+    let st = st () in
+    let  () =
+      reassemble begin fun st -> function
+        | `Fail msg -> failwith msg
+        | `Continue -> handle st
+        | `Frame (hdr, data) ->
+      end st t in
+    fun t ->
+
+      don't_wait_for begin
     Monitor.protect ~here:[%here]
       ~finally:(fun () -> cleanup () ; Deferred.unit)
       begin fun () ->
