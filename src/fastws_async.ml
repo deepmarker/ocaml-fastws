@@ -245,7 +245,7 @@ let process last_pong client_w ws_w ({ header ; payload } as frame) =
   | Binary -> write_client frame
   | Continuation -> assert false
   | _ ->
-    write_ws (closef Status.UnsupportedExtension "") >>| fun () ->
+    write_ws (closef ~status:Status.UnsupportedExtension "") >>| fun () ->
     Pipe.close ws_w ;
     Pipe.close client_w
 

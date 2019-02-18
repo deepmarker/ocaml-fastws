@@ -146,8 +146,11 @@ let create ?(rsv=0) ?(final=true) ?(length=0) ?mask opcode =
 
 type frame = {
   header : t ;
-  payload : Bigstringaf.t option
+  payload : Bigstringaf.t option ;
 }
+
+let pp_frame ppf { header ; _ } =
+  Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t header)
 
 let kcreate opcode content =
   match String.length content with
@@ -157,8 +160,7 @@ let kcreate opcode content =
     { header = create ~length:(Bigstringaf.length content) opcode ;
       payload = Some content }
 
-let createf ?(content="") opcode = kcreate opcode content
-
+let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
 let pingf fmt = Format.kasprintf (kcreate Ping) fmt
 let pongf fmt = Format.kasprintf (kcreate Pong) fmt
 let textf fmt = Format.kasprintf (kcreate Text) fmt
@@ -169,9 +171,10 @@ let close status msg =
   let content = Bigstringaf.create (2 + msglen) in
   Bigstringaf.set_int16_be content 0 (Status.to_int status) ;
   Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen ;
-  { header = create Close ; payload = Some content }
+  { header = create ~length:(2 + msglen) Close ; payload = Some content }
 
-let closef status = Format.kasprintf (close status)
+let closef ?(status=Status.NormalClosure) fmt =
+  Format.kasprintf (close status) fmt
 
 let get_finmask c = Char.code c land 0x80 <> 0
 let get_rsv c = (Char.code c lsr 4) land 0x7
@@ -193,9 +196,12 @@ let xormask ~mask buf =
 type parse_result =
   [`More of int | `Ok of t * int]
 
-let parse buf ~pos ~len =
-  if len < 0 then
-    invalid_arg "parse: len < 0" ;
+let parse ?(pos=0) ?len buf =
+  let len = match len with
+    | Some len -> len
+    | None -> Bigstringaf.length buf - pos in
+  if pos < 0 || len < 0 || pos + len > Bigstringaf.length buf then
+    invalid_arg (Printf.sprintf "parse: pos = %d, len = %d" pos len) ;
   if len < 2 then `More (2 - len)
   else
     let b1 = Bigstringaf.get buf pos in
@@ -204,8 +210,8 @@ let parse buf ~pos ~len =
     let rsv = get_rsv b1 in
     let opcode = get_opcode b1 in
     let masked = get_finmask b2 in
-    let len = get_len b2 in
-    match len, masked with
+    let frame_len = get_len b2 in
+    match frame_len, masked with
     | 126, false ->
       let reql = 2 + 2 in
       if len < reql then `More (reql - len)
@@ -250,8 +256,8 @@ let serialize t { opcode ; rsv ; final ; length ; mask } =
     if length < 126 then length else if length < 1 lsl 16 then 126 else 127 in
   write_uint8 t (match mask with None -> len | Some _ -> 0x80 lor len) ;
   begin
-    if len = 126 then BE.write_uint16 t len
-    else if len = 127 then BE.write_uint64 t (Int64.of_int len)
+    if len = 126 then BE.write_uint16 t length
+    else if len = 127 then BE.write_uint64 t (Int64.of_int length)
   end ;
   match mask with
   | None -> ()

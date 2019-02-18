@@ -80,15 +80,16 @@ type frame = {
   header : t ;
   payload : Bigstringaf.t option
 }
+val pp_frame : Format.formatter -> frame -> unit
 
-val createf : ?content:string -> Opcode.t -> frame
+val createf : Opcode.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
 val pingf   : ('a, Format.formatter, unit, frame) format4 -> 'a
 val pongf   : ('a, Format.formatter, unit, frame) format4 -> 'a
 val textf   : ('a, Format.formatter, unit, frame) format4 -> 'a
 val binaryf : ('a, Format.formatter, unit, frame) format4 -> 'a
-val closef  : Status.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
+val closef  : ?status:Status.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
 val xormask : mask:string -> Bigstringaf.t -> unit
 
 type parse_result = [`More of int | `Ok of t * int]
-val parse : Bigstringaf.t -> pos:int -> len:int -> parse_result
+val parse : ?pos:int -> ?len:int -> Bigstringaf.t -> parse_result
 val serialize : Faraday.t -> t -> unit
