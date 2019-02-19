@@ -17,7 +17,6 @@ type t =
   | Payload of Bigstring.t
 
 let header = function Header _ -> true | _ -> false
-(* let payload = function Payload _ -> true | _ -> false *)
 
 let write_frame w { header ; payload } =
   Pipe.write w (Header header) >>= fun () ->
@@ -63,6 +62,12 @@ let error_handler signal e =
   end ;
   Ivar.fill_if_empty signal false
 
+let write_iovec w iovec =
+  List.fold_left iovec ~init:0 ~f:begin fun a { Faraday.buffer ; off ; len } ->
+    Writer.write_bigstring w buffer ~pos:off ~len ;
+    a+len
+  end
+
 let connect
     ?(stream = Faraday.create 4096)
     ?(crypto = (module Crypto : CRYPTO))
@@ -72,23 +77,22 @@ let connect
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
-  let run (V3.Inet_sock socket) r _ =
-    let writev = Faraday_async.writev_of_fd (Socket.fd socket) in
+  let run _ r w =
     let rec flush () =
       match Faraday.operation stream with
       | `Close -> raise Exit
       | `Yield -> Deferred.unit
-      | `Writev iovecs ->
-        writev iovecs >>= function
-        | `Closed -> raise Exit
-        | `Ok n ->
-          Faraday.shift stream n ;
-          flush () in
+      | `Writev iovec ->
+        let nb_read = write_iovec w iovec in
+        Faraday.shift stream nb_read ;
+        flush () in
     let nonce =
       Base64.encode_exn Crypto.(generate 16 |> to_string) in
     let headers =
-      merge_headers extra_headers (Fastws.headers nonce) in
-    let req = Request.create ~headers `GET (Uri.to_string uri) in
+      Option.value_map ~default:extra_headers (Uri.host uri)
+        ~f:(Headers.add extra_headers "Host") in
+    let headers = merge_headers headers (Fastws.headers nonce) in
+    let req = Request.create ~headers `GET (Uri.path_and_query uri) in
     let ok = Ivar.create () in
     let error_handler = error_handler ok in
     let response_handler =
@@ -97,9 +101,9 @@ let connect
       Client_connection.request req ~error_handler ~response_handler in
     let rec flush_req () =
       match Client_connection.next_write_operation conn with
-      | `Write iovecs ->
-        writev iovecs >>> fun result ->
-        Client_connection.report_write_result conn result ;
+      | `Write iovec ->
+        let nb_read = write_iovec w iovec in
+        Client_connection.report_write_result conn (`Ok nb_read) ;
         flush_req ()
       | `Yield ->
         Client_connection.yield_writer conn flush_req ;
@@ -156,16 +160,12 @@ let connect
         | 0 -> `Need_unknown
         | n -> `Need n in
       let handle_chunk buf ~pos ~len =
-        Logs_async.debug
-          (fun m -> m "handle_chunk %d %d" pos len) >>= fun () ->
         let read_max already_read =
           let will_read = min len !len_to_read in
           len_to_read := !len_to_read - will_read ;
-          let payload = Bigstringaf.sub buf
-              ~off:(pos+already_read) ~len:(len-already_read) in
+          let payload = Bigstring.sub_shared buf
+              ~pos:(pos+already_read) ~len:(len-already_read) in
           handle client_w (Payload payload) >>= fun () ->
-          Logs_async.debug
-            (fun m -> m "consumed %d %d" (already_read + will_read) !len_to_read) >>= fun () ->
           return (`Consumed (already_read + will_read, need !len_to_read)) in
         if !len_to_read > 0 then read_max 0 else
           match parse buf ~pos ~len with
@@ -253,7 +253,9 @@ let process
   let write_client = function
     | { payload = None ; _ } -> Deferred.unit
     | { payload = Some payload ; _ } ->
-      Pipe.write client_w (Bigstring.to_string payload) in
+      let payload = Bigstring.to_string payload in
+      Logs_async.debug ~src (fun m -> m "<- %s" payload) >>= fun () ->
+      Pipe.write client_w payload in
   match header.opcode with
   | Ping ->
     write_frame ws_w { header = { header with opcode = Pong } ; payload }
