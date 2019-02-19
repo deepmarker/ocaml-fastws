@@ -131,12 +131,12 @@ let connect_ez () =
   | `Ok msg' -> check string "" msg msg'
 
 let with_connection_ez () =
+  let msg = "msg" in
   Fastws_async.with_connection_ez url ~f:begin fun r w ->
-    Pipe.write w "msg" >>= fun () ->
-    Pipe.read r >>= function
+    Pipe.write w msg >>= fun () ->
+    Pipe.read r >>| function
     | `Eof -> failwith "did not receive echo"
-    | `Ok "msg" -> Deferred.unit
-    | `Ok _ -> failwith "message has been altered"
+    | `Ok msg' -> check string "" msg msg'
   end
 
 let roundtrip_unmasked =
@@ -160,10 +160,10 @@ let roundtrip_masked_multi =
   end multiframes
 
 let async = Alcotest_async.[
-    (* test_case "connect" `Quick connect ;
-     * test_case "with_connection" `Quick with_connection ; *)
+    test_case "connect" `Quick connect ;
+    test_case "with_connection" `Quick with_connection ;
     test_case "connect_ez" `Quick connect_ez ;
-    (* test_case "with_connection_ez" `Quick with_connection_ez ; *)
+    test_case "with_connection_ez" `Quick with_connection_ez ;
   ]
 
 let () =

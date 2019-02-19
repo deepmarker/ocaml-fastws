@@ -229,7 +229,8 @@ let reassemble k st t =
     k st `Continue
   | Payload _, None -> k st (`Fail "payload without a header")
   | Payload b, Some h ->
-    if not h.final then begin
+    match h.final, Bigbuffer.length st.buf with
+    | false, _ ->
       Bigbuffer.add_bigstring st.buf b ;
       begin match st.header with
         | None -> assert false
@@ -237,14 +238,15 @@ let reassemble k st t =
           st.header <- Some { h with length = h.length - Bigstring.length b }
       end ;
       k st `Continue
-    end
-    else begin
+    | _, 0 ->
+      st.header <- None ;
+      k st (`Frame { header = h ; payload = Some b })
+    | _ ->
       Bigbuffer.add_bigstring st.buf b ;
       st.header <- None ;
       let payload = Bigbuffer.volatile_contents st.buf in
       let payload = Bigstring.sub_shared ~len:h.length payload in
       k st (`Frame { header  = h ; payload = Some payload })
-    end
 
 let process
     cleaning_up cleaned_up last_pong client_w ws_w ({ header ; payload } as frame) =
