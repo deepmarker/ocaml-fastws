@@ -161,10 +161,10 @@ let connect
         | n -> `Need n in
       let handle_chunk buf ~pos ~len =
         let read_max already_read =
-          let will_read = min len !len_to_read in
+          let will_read = min (len - already_read) !len_to_read in
           len_to_read := !len_to_read - will_read ;
           let payload = Bigstring.sub_shared buf
-              ~pos:(pos+already_read) ~len:(len-already_read) in
+              ~pos:(pos+already_read) ~len:will_read in
           handle client_w (Payload payload) >>= fun () ->
           return (`Consumed (already_read + will_read, need !len_to_read)) in
         if !len_to_read > 0 then read_max 0 else
@@ -205,11 +205,13 @@ exception Timeout of Int63.t
 type st = {
   buf : Bigbuffer.t ;
   mutable header : Fastws.t option ;
+  mutable to_read : int ;
 }
 
 let create_st () = {
   buf = Bigbuffer.create 13 ;
   header = None ;
+  to_read = 0 ;
 }
 
 let reassemble k st t =
@@ -218,41 +220,37 @@ let reassemble k st t =
   | Header { opcode; final; _ }, Some { final = false ; _ } when
       final && opcode <> Continuation ->
     k st (`Fail "unfinished continuation")
-  | Header { opcode = Continuation ; length ; final ; _ }, Some h ->
-    st.header <- Some { h with length ; final } ;
+  | Header { opcode = Continuation ; length ; _ }, _ ->
+    st.to_read <- length ;
     k st `Continue
   | Header ({ length = 0 ; final = true ; _ } as h), _ ->
     st.header <- None ;
     k st (`Frame { header = h ; payload = None })
   | Header h, _ ->
     st.header <- Some h ;
+    st.to_read <- h.length ;
     k st `Continue
   | Payload _, None -> k st (`Fail "payload without a header")
   | Payload b, Some h ->
-    match h.final, Bigbuffer.length st.buf with
-    | false, _ ->
-      Bigbuffer.add_bigstring st.buf b ;
-      begin match st.header with
-        | None -> assert false
-        | Some h ->
-          st.header <- Some { h with length = h.length - Bigstring.length b }
-      end ;
-      k st `Continue
-    | _, 0 ->
-      st.header <- None ;
-      k st (`Frame { header = h ; payload = Some b })
-    | _ ->
+    let buflen = Bigstring.length b in
+    match h.final && buflen = st.to_read with
+    | true ->
       Bigbuffer.add_bigstring st.buf b ;
       st.header <- None ;
       let payload = Bigbuffer.volatile_contents st.buf in
       let payload = Bigstring.sub_shared ~len:h.length payload in
-      k st (`Frame { header  = h ; payload = Some payload })
+      k st (`Frame { header = h ; payload = Some payload })
+    | false ->
+      Bigbuffer.add_bigstring st.buf b ;
+      st.to_read <- st.to_read - buflen ;
+      k st `Continue
 
 let process
     cleaning_up cleaned_up last_pong client_w ws_w ({ header ; payload } as frame) =
   let write_client = function
     | { payload = None ; _ } -> Deferred.unit
     | { payload = Some payload ; _ } ->
+      assert (Bigstring.length payload = header.length) ;
       let payload = Bigstring.to_string payload in
       Logs_async.debug ~src (fun m -> m "<- %s" payload) >>= fun () ->
       Pipe.write client_w payload in
