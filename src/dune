@@ -12,6 +12,7 @@
  (modules fastws_async)
  (libraries
   fastws
+  core
   async
   logs-async
   conduit-async
