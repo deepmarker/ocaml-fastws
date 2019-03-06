@@ -3,10 +3,9 @@
    Distributed under the ISC license, see terms at the end of the file.
   ---------------------------------------------------------------------------*)
 
+open Httpaf
 open Core
 open Async
-open Httpaf
-
 open Fastws
 
 let src =
