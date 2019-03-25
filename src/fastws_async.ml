@@ -350,7 +350,10 @@ let connect_ez
           assemble_frames () ;
           Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
         ] >>= fun () ->
-        write_frame w (close "") >>= fun () ->
+        begin
+          if Pipe.is_closed w then Deferred.unit
+          else write_frame w (close "")
+        end >>= fun () ->
         Ivar.fill_if_empty cleaning_up () ;
         Ivar.read cleaned_up
       end
