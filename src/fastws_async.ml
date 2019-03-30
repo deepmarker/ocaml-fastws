@@ -286,10 +286,11 @@ let connect_ez
   let last_pong = ref (Time_stamp_counter.now ()) in
   let cleanup () =
     Pipe.close_read ws_read in
+  let calibrator = Lazy.force Time_stamp_counter.calibrator in
   Clock_ns.every
     ~stop:(Ivar.read cleaned_up)
     (Time_ns.Span.of_int_sec 60)
-    Time_stamp_counter.Calibrator.calibrate ;
+    (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
   let client_read_iv = Ivar.create () in
   let handle =
     let state = ref (create_st ()) in
@@ -313,7 +314,8 @@ let connect_ez
               let now = Time_stamp_counter.now () in
               Pipe.write w (Header (create Ping)) >>= fun () ->
               let elapsed = Time_stamp_counter.diff now !last_pong in
-              let elapsed = Time_stamp_counter.Span.to_ns elapsed in
+              let elapsed =
+                Time_stamp_counter.Span.to_ns ~calibrator elapsed in
               if Int63.(elapsed < span + span) then Deferred.unit
               else begin
                 Logs_async.warn ~src begin fun m ->
