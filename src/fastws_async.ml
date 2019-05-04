@@ -303,34 +303,32 @@ let connect_ez
         | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
       end !state t in
     fun w t -> inner w t in
+  let heartbeat w m span =
+    let send_ping () =
+      let now = Time_stamp_counter.now () in
+      Pipe.write w (Header (create Ping)) >>= fun () ->
+      let elapsed = Time_stamp_counter.diff now !last_pong in
+      let elapsed =
+        Time_stamp_counter.Span.to_ns ~calibrator elapsed in
+      if Int63.(elapsed < span + span) then Deferred.unit
+      else begin
+        Logs_async.warn ~src begin fun m ->
+          m "No pong received to ping request after %a ns, closing"
+            Int63.pp elapsed
+        end >>| fun () ->
+        Monitor.send_exn m (Timeout elapsed)
+      end
+    in
+    Clock_ns.run_at_intervals'
+      ~continue_on_error:false
+      ~stop:(Ivar.read cleaned_up)
+      (Time_ns.Span.of_int63_ns span)
+      send_ping in
   don't_wait_for begin
     Monitor.try_with ~here:[%here] begin fun () ->
       with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
         let m = Monitor.current () in
-        begin match hb_ns with
-          | None -> ()
-          | Some span ->
-            let send_ping () =
-              let now = Time_stamp_counter.now () in
-              Pipe.write w (Header (create Ping)) >>= fun () ->
-              let elapsed = Time_stamp_counter.diff now !last_pong in
-              let elapsed =
-                Time_stamp_counter.Span.to_ns ~calibrator elapsed in
-              if Int63.(elapsed < span + span) then Deferred.unit
-              else begin
-                Logs_async.warn ~src begin fun m ->
-                  m "No pong received to ping request after %a ns, closing"
-                    Int63.pp elapsed
-                end >>| fun () ->
-                Monitor.send_exn m (Timeout elapsed)
-              end
-            in
-            Clock_ns.run_at_intervals'
-              ~continue_on_error:false
-              ~stop:(Ivar.read cleaned_up)
-              (Time_ns.Span.of_int63_ns span)
-              send_ping
-        end ;
+        Option.iter hb_ns ~f:(heartbeat w m) ;
         Ivar.fill client_read_iv client_read ;
         let assemble_frames () =
           let wq = Queue.create () in
