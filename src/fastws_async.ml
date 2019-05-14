@@ -286,11 +286,6 @@ let connect_ez
   let last_pong = ref (Time_stamp_counter.now ()) in
   let cleanup () =
     Pipe.close_read ws_read in
-  let calibrator = Lazy.force Time_stamp_counter.calibrator in
-  Clock_ns.every
-    ~stop:(Ivar.read cleaned_up)
-    (Time_ns.Span.of_int_sec 60)
-    (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
   let client_read_iv = Ivar.create () in
   let handle =
     let state = ref (create_st ()) in
@@ -304,6 +299,11 @@ let connect_ez
       end !state t in
     fun w t -> inner w t in
   let heartbeat w m span =
+    let calibrator = Lazy.force Time_stamp_counter.calibrator in
+    Clock_ns.every
+      ~stop:(Ivar.read cleaned_up)
+      (Time_ns.Span.of_int_sec 60)
+      (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
     let send_ping () =
       let now = Time_stamp_counter.now () in
       Pipe.write w (Header (create Ping)) >>= fun () ->
