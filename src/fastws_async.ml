@@ -11,8 +11,9 @@ open Async_ssl.Std
 
 open Fastws
 
-let src =
-  Logs.Src.create "fastws.async"
+let src = Logs.Src.create "fastws.async"
+module Log = (val Logs.src_log src : Logs.LOG)
+module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 type t =
   | Header of Fastws.t
@@ -34,7 +35,7 @@ let merge_headers h1 h2 =
 let response_handler iv nonce crypto
     ({ Response.version ; status ; headers ; _ } as response) _body =
   let module Crypto = (val crypto : CRYPTO) in
-  Logs.debug ~src (fun m -> m "%a" Response.pp_hum response) ;
+  Log.debug (fun m -> m "%a" Response.pp_hum response) ;
   let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get headers "upgrade") in
   let sec_ws_accept_hdr = Headers.get headers "sec-websocket-accept" in
   let expected_sec =
@@ -46,21 +47,17 @@ let response_handler iv nonce crypto
     Some v when v = expected_sec ->
     Ivar.fill_if_empty iv true
   | _ ->
-    Logs.err ~src
-      (fun m -> m "Invalid response %a" Response.pp_hum response) ;
+    Log.err (fun m -> m "Invalid response %a" Response.pp_hum response) ;
     Ivar.fill_if_empty iv false
 
 let error_handler signal e =
   begin match e with
     | `Exn e ->
-      Logs.err ~src
-        (fun m -> m "Exception %a" Exn.pp e) ;
+      Logs.err (fun m -> m "Exception %a" Exn.pp e) ;
     | `Invalid_response_body_length resp ->
-      Logs.err ~src
-        (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
+      Logs.err (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
     | `Malformed_response msg ->
-      Logs.err ~src
-        (fun m -> m "Malformed response %s" msg)
+      Logs.err ~src (fun m -> m "Malformed response %s" msg)
   end ;
   Ivar.fill_if_empty signal false
 
@@ -155,14 +152,12 @@ let connect
         end in
     flush_req () ;
     don't_wait_for (read_response ()) ;
-    Logs_async.debug ~src
-      (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
+    Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
     Ivar.read ok >>= function
     | false -> failwith "Invalid handshake"
     | true ->
       Ivar.fill initialized () ;
-      Logs_async.debug ~src
-        (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
+      Logs_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
       don't_wait_for begin
         Pipe.fold ws_r ~f:begin fun hdr -> function
           | Header t ->
@@ -170,7 +165,7 @@ let connect
             let h = { t with mask = Some mask } in
             serialize stream h ;
             flush () >>= fun () ->
-            Logs_async.debug ~src (fun m -> m "-> %a" pp t) >>| fun () ->
+            Logs_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
             Some h
           | Payload buf ->
             match hdr with
@@ -201,7 +196,7 @@ let connect
           match parse buf ~pos ~len with
           | `More n -> return (`Consumed (0, `Need (len + n)))
           | `Ok (t, read) ->
-            Logs_async.debug ~src (fun m -> m "<- %a" pp t) >>= fun () ->
+            Logs_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
             handle client_w (Header t) >>= fun () ->
             len_to_read := t.length ;
             if read < len then
@@ -292,7 +287,7 @@ let process
     | { payload = Some payload ; _ } ->
       assert (Bigstring.length payload = header.length) ;
       let payload = Bigstring.to_string payload in
-      Logs_async.debug ~src (fun m -> m "<- %s" payload) >>= fun () ->
+      Logs_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
       Pipe.write client_w payload in
   match header.opcode with
   | Ping ->
@@ -353,7 +348,7 @@ let connect_ez
         Time_stamp_counter.Span.to_ns ~calibrator elapsed in
       if Int63.(elapsed < span + span) then Deferred.unit
       else begin
-        Logs_async.warn ~src begin fun m ->
+        Logs_async.warn begin fun m ->
           m "No pong received to ping request after %a ns, closing"
             Int63.pp elapsed
         end >>| fun () ->
@@ -400,7 +395,7 @@ let connect_ez
       end
     end >>= function
     | Error exn ->
-      Logs_async.err ~src (fun m -> m "%a" Exn.pp exn) >>= fun () ->
+      Logs_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
       cleanup () ;
       Ivar.fill_if_empty cleaned_up () ;
       Deferred.unit
