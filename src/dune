@@ -22,7 +22,7 @@
    fastws
    core
    async
-   async_ssl
    logs-async
    angstrom-async
-   faraday-async))
+   faraday-async
+   async-uri))
