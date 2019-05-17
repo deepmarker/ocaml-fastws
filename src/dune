@@ -3,7 +3,14 @@
  (public_name fastws)
  (preprocess (pps ppx_here ppx_sexp_conv))
  (modules fastws sha1)
- (libraries logs sexplib astring base64 angstrom faraday httpaf))
+ (libraries
+   logs
+   sexplib
+   astring
+   base64
+   angstrom
+   faraday
+   httpaf))
 
 (library
  (name fastws_async)
@@ -11,10 +18,11 @@
  (preprocess (pps ppx_here ppx_sexp_conv))
  (modules fastws_async)
  (libraries
-  fastws
-  core
-  async
-  logs-async
-  conduit-async
-  angstrom-async
-  faraday-async))
+   uri
+   fastws
+   core
+   async
+   async_ssl
+   logs-async
+   angstrom-async
+   faraday-async))

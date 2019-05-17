@@ -4,8 +4,11 @@
   ---------------------------------------------------------------------------*)
 
 open Httpaf
+
 open Core
 open Async
+open Async_ssl.Std
+
 open Fastws
 
 let src =
@@ -67,16 +70,44 @@ let write_iovec w iovec =
     a+len
   end
 
+let ssl_connect r w =
+  let net_to_ssl, net_to_ssl_w = Pipe.create () in
+  let ssl_to_net_r, ssl_to_net = Pipe.create () in
+  don't_wait_for (Pipe.transfer_id (Reader.pipe r) net_to_ssl_w) ;
+  don't_wait_for (Pipe.transfer_id ssl_to_net_r (Writer.pipe w)) ;
+  let app_to_ssl, client_w = Pipe.create () in
+  let client_r, ssl_to_app = Pipe.create () in
+  Ssl.client ~app_to_ssl ~ssl_to_app ~net_to_ssl ~ssl_to_net () >>= function
+  | Error e -> Error.raise e
+  | Ok conn ->
+    Reader.of_pipe (Info.createf "ssl_r") client_r >>= fun client_r ->
+    Writer.of_pipe (Info.createf "ssl_w") client_w >>=
+    fun (client_w, `Closed_and_flushed_downstream flushed) ->
+    return (Some (conn, flushed), client_r, client_w)
+
+let ssl_cleanup = function
+  | None -> Deferred.unit
+  | Some (conn, flushed) ->
+    Monitor.try_with begin fun () ->
+      flushed >>| fun () ->
+      Ssl.Connection.close conn
+    end >>= fun _ ->
+    Deferred.unit
+
 let connect
     ?(stream = Faraday.create 4096)
     ?(crypto = (module Crypto : CRYPTO))
     ?(extra_headers = Headers.empty)
-    ~handle uri =
-  let open Conduit_async in
+    ~handle url =
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
-  let run _ r w =
+  let run url _sock r w =
+    begin match Uri.scheme url with
+      | Some "https"
+      | Some "wss" -> ssl_connect r w
+      | _ -> return (None, r, w)
+    end >>= fun (ssl, r, w) ->
     let rec flush () =
       match Faraday.operation stream with
       | `Close -> raise Exit
@@ -88,10 +119,10 @@ let connect
     let nonce =
       Base64.encode_exn Crypto.(generate 16 |> to_string) in
     let headers =
-      Option.value_map ~default:extra_headers (Uri.host uri)
+      Option.value_map ~default:extra_headers (Uri.host url)
         ~f:(Headers.add extra_headers "Host") in
     let headers = merge_headers headers (Fastws.headers nonce) in
-    let req = Request.create ~headers `GET (Uri.path_and_query uri) in
+    let req = Request.create ~headers `GET (Uri.path_and_query url) in
     let ok = Ivar.create () in
     let error_handler = error_handler ok in
     let response_handler =
@@ -131,7 +162,7 @@ let connect
     | true ->
       Ivar.fill initialized () ;
       Logs_async.debug ~src
-        (fun m -> m "Connected to %a" Uri.pp_hum uri) >>= fun () ->
+        (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
       don't_wait_for begin
         Pipe.fold ws_r ~f:begin fun hdr -> function
           | Header t ->
@@ -179,16 +210,26 @@ let connect
               return (`Consumed (len, `Need_unknown))
       in
       Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
-      | `Stopped _ ->
-        Logs_async.err ~src (fun m -> m "Connection terminated") >>= fun () ->
-        Deferred.unit
       | `Eof
-      | `Eof_with_unconsumed_data _ ->
-        Deferred.unit
+      | `Eof_with_unconsumed_data _ -> ssl_cleanup ssl
+      | `Stopped _ ->
+        ssl_cleanup ssl >>= fun () ->
+        Logs_async.err ~src (fun m -> m "Connection terminated")
   in
+  let host = match Uri.host url with
+    | None -> invalid_arg "no host in URL"
+    | Some host -> host in
+  let port = match Uri.port url, Uri.scheme url with
+    | Some p, _ -> p
+    | None, Some "wss"
+    | None, Some "https" -> 443
+    | _ -> 80 in
   don't_wait_for begin
     Monitor.protect ~here:[%here]
-      (fun () -> V3.with_connection_uri uri run)
+      (fun () ->
+         Unix.Inet_addr.of_string_or_getbyname host >>= fun inet_addr ->
+         Tcp.with_connection
+           (Tcp.Where_to_connect.of_inet_address (`Inet (inet_addr, port))) (run url))
       ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
   end ;
   Ivar.read initialized >>| fun () ->
