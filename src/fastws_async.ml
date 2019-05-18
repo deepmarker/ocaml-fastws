@@ -180,10 +180,10 @@ let connect
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
   don't_wait_for begin
-    Monitor.protect ~here:[%here]
-      (fun () -> Async_uri.with_connection_uri url
-          (run stream extra_headers initialized ws_r client_w handle))
-      ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
+    Monitor.protect ~here:[%here] begin fun () ->
+      Async_uri.with_connection_uri url
+        (run stream extra_headers initialized ws_r client_w handle)
+    end ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
   end ;
   Ivar.read initialized >>| fun () ->
   client_w
