@@ -292,6 +292,22 @@ let heartbeat w m last_pong cleaned_up span =
     (Time_ns.Span.of_int63_ns span)
     send_ping
 
+let assemble_frames binary ws_read w =
+  let wq = Queue.create () in
+  Pipe.transfer' ws_read w ~f:begin fun mq ->
+    Queue.clear wq ;
+    Queue.iter mq ~f:begin fun m ->
+      let { header ; payload } = match binary with
+        | true -> Fastws.binary m
+        | false -> Fastws.text m in
+      Queue.enqueue wq (Header header) ;
+      match payload with
+      | None -> ()
+      | Some payload -> Queue.enqueue wq (Payload payload)
+    end ;
+    return wq
+  end
+
 let connect_ez
     ?(crypto=(module Crypto : CRYPTO))
     ?(binary=false)
@@ -323,24 +339,8 @@ let connect_ez
         let m = Monitor.current () in
         Option.iter hb_ns ~f:(heartbeat w m last_pong cleaned_up) ;
         Ivar.fill client_read_iv client_read ;
-        let assemble_frames () =
-          let wq = Queue.create () in
-          Pipe.transfer' ws_read w ~f:begin fun mq ->
-            Queue.clear wq ;
-            Queue.iter mq ~f:begin fun m ->
-              let { header ; payload } = match binary with
-                | true -> Fastws.binary m
-                | false -> Fastws.text m in
-              Queue.enqueue wq (Header header) ;
-              match payload with
-              | None -> ()
-              | Some payload -> Queue.enqueue wq (Payload payload)
-            end ;
-            return wq
-          end
-        in
         Deferred.any_unit [
-          assemble_frames () ;
+          assemble_frames binary ws_read w ;
           Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
         ] >>= fun () ->
         begin
