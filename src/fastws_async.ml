@@ -352,9 +352,8 @@ let connect_ez
         begin
           if Pipe.is_closed w then Deferred.unit
           else write_frame w (close "")
-        end >>= fun () ->
-        Ivar.fill_if_empty cleaning_up () ;
-        Ivar.read cleaned_up
+        end >>| fun () ->
+        Ivar.fill_if_empty cleaning_up ()
       end
     end >>= function
     | Error exn ->
@@ -364,6 +363,7 @@ let connect_ez
       Deferred.unit
     | Ok () ->
       cleanup () ;
+      Ivar.fill_if_empty cleaned_up () ;
       Deferred.unit
   end ;
   Ivar.read initialized >>| fun () ->
