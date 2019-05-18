@@ -114,8 +114,12 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
   flush_req conn w ;
   don't_wait_for (read_response conn r) ;
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
-  Ivar.read ok >>= function
-  | false -> failwith "Invalid handshake"
+  Deferred.any [ Ivar.read ok ;
+                 Clock_ns.after (Time_ns.Span.of_int_sec 10) >>| fun () ->
+                 false ] >>= function
+  | false ->
+    if Ivar.is_full ok then failwith "Invalid handshake"
+    else failwith "endpoint does not respond"
   | true ->
     Ivar.fill initialized () ;
     Logs_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
@@ -178,14 +182,15 @@ let connect
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
-  don't_wait_for begin
+  let conn =
     Monitor.protect ~here:[%here] begin fun () ->
       Async_uri.with_connection_uri url
         (run stream extra_headers initialized ws_r client_w handle)
-    end ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
-  end ;
-  Ivar.read initialized >>| fun () ->
-  client_w
+    end ~finally:(fun () -> Pipe.close client_w ; Deferred.unit) in
+  Deferred.any_unit [ conn ;  Ivar.read initialized ] >>= fun () ->
+  match Ivar.is_full initialized with
+  | true -> return client_w
+  | false -> failwith "tcp connect timeout"
 
 let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
   connect ?stream ?extra_headers ?crypto ~handle uri >>= fun w ->
@@ -264,15 +269,14 @@ let process
     Pipe.close ws_w ;
     Pipe.close client_w
 
-let heartbeat w m last_pong cleaned_up span =
-  let calibrator = Lazy.force Time_stamp_counter.calibrator in
+let heartbeat calibrator w m last_pong cleaned_up span =
   Clock_ns.every
     ~stop:(Ivar.read cleaned_up)
     (Time_ns.Span.of_int_sec 60)
     (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
   let send_ping () =
     let now = Time_stamp_counter.now () in
-    Pipe.write w (Header (create Ping)) >>= fun () ->
+    Pipe.write_if_open w (Header (create Ping)) >>= fun () ->
     let elapsed = Time_stamp_counter.diff now !last_pong in
     let elapsed =
       Time_stamp_counter.Span.to_ns ~calibrator elapsed in
@@ -320,7 +324,7 @@ let connect_ez
   let last_pong = ref (Time_stamp_counter.now ()) in
   let cleanup () =
     Pipe.close_read ws_read in
-  let client_read_iv = Ivar.create () in
+  let initialized = Ivar.create () in
   let handle =
     let state = ref (create_st ()) in
     let inner w t =
@@ -332,12 +336,15 @@ let connect_ez
         | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
       end !state t in
     fun w t -> inner w t in
+  let m = Monitor.current () in
   don't_wait_for begin
     Monitor.try_with ~here:[%here] begin fun () ->
       with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
-        let m = Monitor.current () in
-        Option.iter hb_ns ~f:(heartbeat w m last_pong cleaned_up) ;
-        Ivar.fill client_read_iv client_read ;
+        Option.iter hb_ns ~f:begin
+          heartbeat (Lazy.force Time_stamp_counter.calibrator)
+            w (Monitor.current ()) last_pong cleaned_up
+        end ;
+        Ivar.fill initialized () ;
         Deferred.any_unit [
           assemble_frames binary ws_read w ;
           Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
@@ -351,15 +358,15 @@ let connect_ez
       end
     end >>= function
     | Error exn ->
-      Logs_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
       cleanup () ;
       Ivar.fill_if_empty cleaned_up () ;
+      Monitor.send_exn m exn ;
       Deferred.unit
     | Ok () ->
       cleanup () ;
       Deferred.unit
   end ;
-  Ivar.read client_read_iv >>| fun client_read ->
+  Ivar.read initialized >>| fun () ->
   client_read, client_write, Ivar.read cleaned_up
 
 let with_connection_ez
