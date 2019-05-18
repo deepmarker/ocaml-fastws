@@ -240,27 +240,25 @@ let reassemble k st t =
 
 let process
     cleaning_up cleaned_up last_pong client_w ws_w ({ header ; payload } as frame) =
-  let write_client = function
-    | { payload = None ; _ } -> Deferred.unit
-    | { payload = Some payload ; _ } ->
-      assert (Bigstring.length payload = header.length) ;
-      let payload = Bigstring.to_string payload in
-      Logs_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
-      Pipe.write client_w payload in
   match header.opcode with
   | Ping ->
     write_frame ws_w { header = { header with opcode = Pong } ; payload }
   | Close ->
-    begin if Ivar.is_empty cleaning_up then
-        write_frame ws_w frame
-      else Deferred.unit
-    end >>| fun () ->
+    (if Ivar.is_empty cleaning_up
+     then write_frame ws_w frame else Deferred.unit) >>| fun () ->
     Ivar.fill_if_empty cleaned_up ()
   | Pong ->
     last_pong := Time_stamp_counter.now () ;
     Deferred.unit
   | Text
-  | Binary -> write_client frame
+  | Binary -> begin match frame with
+      | { payload = None ; _ } -> Deferred.unit
+      | { payload = Some payload ; _ } ->
+        assert (Bigstring.length payload = header.length) ;
+        let payload = Bigstring.to_string payload in
+        Logs_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
+        Pipe.write_if_open client_w payload
+    end
   | Continuation -> assert false
   | _ ->
     write_frame ws_w (close ~status:Status.UnsupportedExtension "") >>| fun () ->
