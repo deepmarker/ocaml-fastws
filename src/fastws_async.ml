@@ -66,6 +66,111 @@ let write_iovec w iovec =
     a+len
   end
 
+let run stream extra_headers initialized ws_r client_w handle url _sock r w =
+  let rec flush () =
+    match Faraday.operation stream with
+    | `Close -> raise Exit
+    | `Yield -> Deferred.unit
+    | `Writev iovec ->
+      let nb_read = write_iovec w iovec in
+      Faraday.shift stream nb_read ;
+      flush () in
+  let nonce =
+    Base64.encode_exn Crypto.(generate 16 |> to_string) in
+  let headers =
+    Option.value_map ~default:extra_headers (Uri.host url)
+      ~f:(Headers.add extra_headers "Host") in
+  let headers = merge_headers headers (Fastws.headers nonce) in
+  let req = Request.create ~headers `GET (Uri.path_and_query url) in
+  let ok = Ivar.create () in
+  let error_handler = error_handler ok in
+  let response_handler =
+    response_handler ok nonce (module Crypto) in
+  let _body, conn =
+    Client_connection.request req ~error_handler ~response_handler in
+  let rec flush_req () =
+    match Client_connection.next_write_operation conn with
+    | `Write iovec ->
+      let nb_read = write_iovec w iovec in
+      Client_connection.report_write_result conn (`Ok nb_read) ;
+      flush_req ()
+    | `Yield ->
+      Client_connection.yield_writer conn flush_req ;
+    | `Close _ -> () in
+  let rec read_response () =
+    match Client_connection.next_read_operation conn with
+    | `Close -> Deferred.unit
+    | `Read -> begin
+        Reader.read_one_chunk_at_a_time r
+          ~handle_chunk:begin fun buf ~pos ~len ->
+            let nb_read = Client_connection.read conn buf ~off:pos ~len in
+            return (`Stop_consumed ((), nb_read))
+          end >>= function
+        | `Eof
+        | `Eof_with_unconsumed_data _ ->
+          raise Exit
+        | `Stopped () ->
+          read_response ()
+      end in
+  flush_req () ;
+  don't_wait_for (read_response ()) ;
+  Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
+  Ivar.read ok >>= function
+  | false -> failwith "Invalid handshake"
+  | true ->
+    Ivar.fill initialized () ;
+    Logs_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
+    don't_wait_for begin
+      Pipe.fold ws_r ~f:begin fun hdr -> function
+        | Header t ->
+          let mask = Crypto.(to_string (generate 4)) in
+          let h = { t with mask = Some mask } in
+          serialize stream h ;
+          flush () >>= fun () ->
+          Logs_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
+          Some h
+        | Payload buf ->
+          match hdr with
+          | Some { mask = Some mask ; _ } ->
+            xormask ~mask buf ;
+            Faraday.write_bigstring stream buf ;
+            xormask ~mask buf ;
+            flush () >>| fun () ->
+            hdr
+          | _ ->
+            failwith "current header must exist"
+      end ~init:None >>= fun _ ->
+      Deferred.unit
+    end ;
+    let len_to_read = ref 0 in
+    let need = function
+      | 0 -> `Need_unknown
+      | n -> `Need n in
+    let handle_chunk buf ~pos ~len =
+      let read_max already_read =
+        let will_read = min (len - already_read) !len_to_read in
+        len_to_read := !len_to_read - will_read ;
+        let payload = Bigstring.sub_shared buf
+            ~pos:(pos+already_read) ~len:will_read in
+        handle client_w (Payload payload) >>= fun () ->
+        return (`Consumed (already_read + will_read, need !len_to_read)) in
+      if !len_to_read > 0 then read_max 0 else
+        match parse buf ~pos ~len with
+        | `More n -> return (`Consumed (0, `Need (len + n)))
+        | `Ok (t, read) ->
+          Logs_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
+          handle client_w (Header t) >>= fun () ->
+          len_to_read := t.length ;
+          if read < len then
+            read_max read
+          else
+            return (`Consumed (len, `Need_unknown))
+    in
+    Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
+    | `Eof
+    | `Eof_with_unconsumed_data _ -> Deferred.unit
+    | `Stopped _ -> Logs_async.err (fun m -> m "Connection terminated")
+
 let connect
     ?(stream = Faraday.create 4096)
     ?(crypto = (module Crypto : CRYPTO))
@@ -74,114 +179,10 @@ let connect
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
-  let run url _sock r w =
-    let rec flush () =
-      match Faraday.operation stream with
-      | `Close -> raise Exit
-      | `Yield -> Deferred.unit
-      | `Writev iovec ->
-        let nb_read = write_iovec w iovec in
-        Faraday.shift stream nb_read ;
-        flush () in
-    let nonce =
-      Base64.encode_exn Crypto.(generate 16 |> to_string) in
-    let headers =
-      Option.value_map ~default:extra_headers (Uri.host url)
-        ~f:(Headers.add extra_headers "Host") in
-    let headers = merge_headers headers (Fastws.headers nonce) in
-    let req = Request.create ~headers `GET (Uri.path_and_query url) in
-    let ok = Ivar.create () in
-    let error_handler = error_handler ok in
-    let response_handler =
-      response_handler ok nonce (module Crypto) in
-    let _body, conn =
-      Client_connection.request req ~error_handler ~response_handler in
-    let rec flush_req () =
-      match Client_connection.next_write_operation conn with
-      | `Write iovec ->
-        let nb_read = write_iovec w iovec in
-        Client_connection.report_write_result conn (`Ok nb_read) ;
-        flush_req ()
-      | `Yield ->
-        Client_connection.yield_writer conn flush_req ;
-      | `Close _ -> () in
-    let rec read_response () =
-      match Client_connection.next_read_operation conn with
-      | `Close -> Deferred.unit
-      | `Read -> begin
-          Reader.read_one_chunk_at_a_time r
-            ~handle_chunk:begin fun buf ~pos ~len ->
-              let nb_read = Client_connection.read conn buf ~off:pos ~len in
-              return (`Stop_consumed ((), nb_read))
-            end >>= function
-          | `Eof
-          | `Eof_with_unconsumed_data _ ->
-            raise Exit
-          | `Stopped () ->
-            read_response ()
-        end in
-    flush_req () ;
-    don't_wait_for (read_response ()) ;
-    Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
-    Ivar.read ok >>= function
-    | false -> failwith "Invalid handshake"
-    | true ->
-      Ivar.fill initialized () ;
-      Logs_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
-      don't_wait_for begin
-        Pipe.fold ws_r ~f:begin fun hdr -> function
-          | Header t ->
-            let mask = Crypto.(to_string (generate 4)) in
-            let h = { t with mask = Some mask } in
-            serialize stream h ;
-            flush () >>= fun () ->
-            Logs_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
-            Some h
-          | Payload buf ->
-            match hdr with
-            | Some { mask = Some mask ; _ } ->
-              xormask ~mask buf ;
-              Faraday.write_bigstring stream buf ;
-              xormask ~mask buf ;
-              flush () >>| fun () ->
-              hdr
-            | _ ->
-              failwith "current header must exist"
-        end ~init:None >>= fun _ ->
-        Deferred.unit
-      end ;
-      let len_to_read = ref 0 in
-      let need = function
-        | 0 -> `Need_unknown
-        | n -> `Need n in
-      let handle_chunk buf ~pos ~len =
-        let read_max already_read =
-          let will_read = min (len - already_read) !len_to_read in
-          len_to_read := !len_to_read - will_read ;
-          let payload = Bigstring.sub_shared buf
-              ~pos:(pos+already_read) ~len:will_read in
-          handle client_w (Payload payload) >>= fun () ->
-          return (`Consumed (already_read + will_read, need !len_to_read)) in
-        if !len_to_read > 0 then read_max 0 else
-          match parse buf ~pos ~len with
-          | `More n -> return (`Consumed (0, `Need (len + n)))
-          | `Ok (t, read) ->
-            Logs_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
-            handle client_w (Header t) >>= fun () ->
-            len_to_read := t.length ;
-            if read < len then
-              read_max read
-            else
-              return (`Consumed (len, `Need_unknown))
-      in
-      Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
-      | `Eof
-      | `Eof_with_unconsumed_data _ -> Deferred.unit
-      | `Stopped _ -> Logs_async.err (fun m -> m "Connection terminated")
-  in
   don't_wait_for begin
     Monitor.protect ~here:[%here]
-      (fun () -> Async_uri.with_connection_uri url run)
+      (fun () -> Async_uri.with_connection_uri url
+          (run stream extra_headers initialized ws_r client_w handle))
       ~finally:(fun () -> Pipe.close client_w ; Deferred.unit)
   end ;
   Ivar.read initialized >>| fun () ->
@@ -266,6 +267,33 @@ let process
     Pipe.close ws_w ;
     Pipe.close client_w
 
+let heartbeat w m last_pong cleaned_up span =
+  let calibrator = Lazy.force Time_stamp_counter.calibrator in
+  Clock_ns.every
+    ~stop:(Ivar.read cleaned_up)
+    (Time_ns.Span.of_int_sec 60)
+    (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
+  let send_ping () =
+    let now = Time_stamp_counter.now () in
+    Pipe.write w (Header (create Ping)) >>= fun () ->
+    let elapsed = Time_stamp_counter.diff now !last_pong in
+    let elapsed =
+      Time_stamp_counter.Span.to_ns ~calibrator elapsed in
+    if Int63.(elapsed < span + span) then Deferred.unit
+    else begin
+      Logs_async.warn ~src begin fun m ->
+        m "No pong received to ping request after %a ns, closing"
+          Int63.pp elapsed
+      end >>| fun () ->
+      Monitor.send_exn m (Timeout elapsed)
+    end
+  in
+  Clock_ns.run_at_intervals'
+    ~continue_on_error:false
+    ~stop:(Ivar.read cleaned_up)
+    (Time_ns.Span.of_int63_ns span)
+    send_ping
+
 let connect_ez
     ?(crypto=(module Crypto : CRYPTO))
     ?(binary=false)
@@ -291,37 +319,11 @@ let connect_ez
         | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
       end !state t in
     fun w t -> inner w t in
-  let heartbeat w m span =
-    let calibrator = Lazy.force Time_stamp_counter.calibrator in
-    Clock_ns.every
-      ~stop:(Ivar.read cleaned_up)
-      (Time_ns.Span.of_int_sec 60)
-      (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
-    let send_ping () =
-      let now = Time_stamp_counter.now () in
-      Pipe.write w (Header (create Ping)) >>= fun () ->
-      let elapsed = Time_stamp_counter.diff now !last_pong in
-      let elapsed =
-        Time_stamp_counter.Span.to_ns ~calibrator elapsed in
-      if Int63.(elapsed < span + span) then Deferred.unit
-      else begin
-        Logs_async.warn begin fun m ->
-          m "No pong received to ping request after %a ns, closing"
-            Int63.pp elapsed
-        end >>| fun () ->
-        Monitor.send_exn m (Timeout elapsed)
-      end
-    in
-    Clock_ns.run_at_intervals'
-      ~continue_on_error:false
-      ~stop:(Ivar.read cleaned_up)
-      (Time_ns.Span.of_int63_ns span)
-      send_ping in
   don't_wait_for begin
     Monitor.try_with ~here:[%here] begin fun () ->
       with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
         let m = Monitor.current () in
-        Option.iter hb_ns ~f:(heartbeat w m) ;
+        Option.iter hb_ns ~f:(heartbeat w m last_pong cleaned_up) ;
         Ivar.fill client_read_iv client_read ;
         let assemble_frames () =
           let wq = Queue.create () in
