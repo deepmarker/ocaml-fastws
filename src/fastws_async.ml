@@ -99,7 +99,7 @@ let rec flush stream w =
     Faraday.shift stream nb_read ;
     flush stream w
 
-let run stream extra_headers initialized ws_r client_w handle url _sock r w =
+let run stream extra_headers initialized ws_r client_w handle url _sock _conn r w =
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
     Option.value_map ~default:extra_headers (Uri.host url)
@@ -184,8 +184,8 @@ let connect
   let ws_r, client_w = Pipe.create () in
   let conn =
     Monitor.protect ~here:[%here] begin fun () ->
-      Async_uri.with_connection_uri url
-        (run stream extra_headers initialized ws_r client_w handle)
+      Async_uri.with_connection url
+        (run stream extra_headers initialized ws_r client_w handle url)
     end ~finally:(fun () -> Pipe.close client_w ; Deferred.unit) in
   Deferred.any_unit [ conn ;  Ivar.read initialized ] >>= fun () ->
   match Ivar.is_full initialized with
