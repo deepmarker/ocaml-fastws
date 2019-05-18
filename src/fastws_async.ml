@@ -52,11 +52,11 @@ let response_handler iv nonce crypto
 let error_handler signal e =
   begin match e with
     | `Exn e ->
-      Logs.err (fun m -> m "Exception %a" Exn.pp e) ;
+      Log.err (fun m -> m "Exception %a" Exn.pp e) ;
     | `Invalid_response_body_length resp ->
-      Logs.err (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
+      Log.err (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
     | `Malformed_response msg ->
-      Logs.err ~src (fun m -> m "Malformed response %s" msg)
+      Log.err (fun m -> m "Malformed response %s" msg)
   end ;
   Ivar.fill_if_empty signal false
 
@@ -122,7 +122,7 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
     else failwith "endpoint does not respond"
   | true ->
     Ivar.fill initialized () ;
-    Logs_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
+    Log_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
     don't_wait_for begin
       Pipe.fold ws_r ~f:begin fun hdr -> function
         | Header t ->
@@ -130,7 +130,7 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
           let h = { t with mask = Some mask } in
           serialize stream h ;
           flush stream w >>= fun () ->
-          Logs_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
+          Log_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
           Some h
         | Payload buf ->
           match hdr with
@@ -161,7 +161,7 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
         match parse buf ~pos ~len with
         | `More n -> return (`Consumed (0, `Need (len + n)))
         | `Ok (t, read) ->
-          Logs_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
+          Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
           handle client_w (Header t) >>= fun () ->
           len_to_read := t.length ;
           if read < len then
@@ -172,7 +172,7 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
     Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
     | `Eof
     | `Eof_with_unconsumed_data _ -> Deferred.unit
-    | `Stopped _ -> Logs_async.err (fun m -> m "Connection terminated")
+    | `Stopped _ -> Log_async.err (fun m -> m "Connection terminated")
 
 let connect
     ?(stream = Faraday.create 4096)
@@ -260,7 +260,7 @@ let process
       | { payload = Some payload ; _ } ->
         assert (Bigstring.length payload = header.length) ;
         let payload = Bigstring.to_string payload in
-        Logs_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
+        Log_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
         Pipe.write_if_open client_w payload
     end
   | Continuation -> assert false
@@ -282,7 +282,7 @@ let heartbeat calibrator w m last_pong cleaned_up span =
       Time_stamp_counter.Span.to_ns ~calibrator elapsed in
     if Int63.(elapsed < span + span) then Deferred.unit
     else begin
-      Logs_async.warn ~src begin fun m ->
+      Log_async.warn begin fun m ->
         m "No pong received to ping request after %a ns, closing"
           Int63.pp elapsed
       end >>| fun () ->
