@@ -66,17 +66,41 @@ let write_iovec w iovec =
     a+len
   end
 
+let rec flush_req conn w =
+  match Client_connection.next_write_operation conn with
+  | `Write iovec ->
+    let nb_read = write_iovec w iovec in
+    Client_connection.report_write_result conn (`Ok nb_read) ;
+    flush_req conn w
+  | `Yield ->
+    Client_connection.yield_writer conn (fun () -> flush_req conn w) ;
+  | `Close _ -> ()
+
+let rec read_response conn r =
+  match Client_connection.next_read_operation conn with
+  | `Close -> Deferred.unit
+  | `Read -> begin
+      Reader.read_one_chunk_at_a_time r
+        ~handle_chunk:begin fun buf ~pos ~len ->
+          let nb_read = Client_connection.read conn buf ~off:pos ~len in
+          return (`Stop_consumed ((), nb_read))
+        end >>= function
+      | `Eof
+      | `Eof_with_unconsumed_data _ -> raise Exit
+      | `Stopped () -> read_response conn r
+    end
+
+let rec flush stream w =
+  match Faraday.operation stream with
+  | `Close -> raise Exit
+  | `Yield -> Deferred.unit
+  | `Writev iovec ->
+    let nb_read = write_iovec w iovec in
+    Faraday.shift stream nb_read ;
+    flush stream w
+
 let run stream extra_headers initialized ws_r client_w handle url _sock r w =
-  let rec flush () =
-    match Faraday.operation stream with
-    | `Close -> raise Exit
-    | `Yield -> Deferred.unit
-    | `Writev iovec ->
-      let nb_read = write_iovec w iovec in
-      Faraday.shift stream nb_read ;
-      flush () in
-  let nonce =
-    Base64.encode_exn Crypto.(generate 16 |> to_string) in
+  let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
     Option.value_map ~default:extra_headers (Uri.host url)
       ~f:(Headers.add extra_headers "Host") in
@@ -84,36 +108,11 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
   let req = Request.create ~headers `GET (Uri.path_and_query url) in
   let ok = Ivar.create () in
   let error_handler = error_handler ok in
-  let response_handler =
-    response_handler ok nonce (module Crypto) in
+  let response_handler = response_handler ok nonce (module Crypto) in
   let _body, conn =
     Client_connection.request req ~error_handler ~response_handler in
-  let rec flush_req () =
-    match Client_connection.next_write_operation conn with
-    | `Write iovec ->
-      let nb_read = write_iovec w iovec in
-      Client_connection.report_write_result conn (`Ok nb_read) ;
-      flush_req ()
-    | `Yield ->
-      Client_connection.yield_writer conn flush_req ;
-    | `Close _ -> () in
-  let rec read_response () =
-    match Client_connection.next_read_operation conn with
-    | `Close -> Deferred.unit
-    | `Read -> begin
-        Reader.read_one_chunk_at_a_time r
-          ~handle_chunk:begin fun buf ~pos ~len ->
-            let nb_read = Client_connection.read conn buf ~off:pos ~len in
-            return (`Stop_consumed ((), nb_read))
-          end >>= function
-        | `Eof
-        | `Eof_with_unconsumed_data _ ->
-          raise Exit
-        | `Stopped () ->
-          read_response ()
-      end in
-  flush_req () ;
-  don't_wait_for (read_response ()) ;
+  flush_req conn w ;
+  don't_wait_for (read_response conn r) ;
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
   Ivar.read ok >>= function
   | false -> failwith "Invalid handshake"
@@ -126,7 +125,7 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
           let mask = Crypto.(to_string (generate 4)) in
           let h = { t with mask = Some mask } in
           serialize stream h ;
-          flush () >>= fun () ->
+          flush stream w >>= fun () ->
           Logs_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
           Some h
         | Payload buf ->
@@ -135,7 +134,7 @@ let run stream extra_headers initialized ws_r client_w handle url _sock r w =
             xormask ~mask buf ;
             Faraday.write_bigstring stream buf ;
             xormask ~mask buf ;
-            flush () >>| fun () ->
+            flush stream w >>| fun () ->
             hdr
           | _ ->
             failwith "current header must exist"
