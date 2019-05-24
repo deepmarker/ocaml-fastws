@@ -282,7 +282,7 @@ let heartbeat calibrator w m last_pong cleaned_up span =
       Time_stamp_counter.Span.to_ns ~calibrator elapsed in
     if Int63.(elapsed < span + span) then Deferred.unit
     else begin
-      Log_async.warn begin fun m ->
+      Log_async.err begin fun m ->
         m "No pong received to ping request after %a ns, closing"
           Int63.pp elapsed
       end >>| fun () ->
@@ -357,6 +357,7 @@ let connect_ez
       end
     end >>= function
     | Error exn ->
+      Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
       cleanup () ;
       Ivar.fill_if_empty cleaned_up () ;
       Monitor.send_exn m exn ;
