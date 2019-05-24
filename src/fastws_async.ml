@@ -345,10 +345,9 @@ let connect_ez
             w (Monitor.current ()) last_pong cleaned_up
         end ;
         Ivar.fill initialized () ;
-        Deferred.any_unit [
-          assemble_frames binary ws_read w ;
-          Deferred.all_unit Pipe.[ closed client_read ; closed client_write ]
-        ] >>= fun () ->
+        don't_wait_for (assemble_frames binary ws_read w) ;
+        Deferred.all_unit
+          Pipe.[ closed client_read ; closed client_write ] >>= fun () ->
         begin
           if Pipe.is_closed w then Deferred.unit
           else write_frame w (close "")
