@@ -37,13 +37,11 @@ val with_connection :
   Uri.t ->
   'a Deferred.t
 
-exception Timeout of Int63.t
-
 val connect_ez :
   ?crypto:(module CRYPTO) ->
   ?binary:bool ->
   ?extra_headers:Headers.t ->
-  ?hb_ns:Int63.t ->
+  ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
   Uri.t ->
   (string Pipe.Reader.t * string Pipe.Writer.t * unit Deferred.t) Deferred.t
 
@@ -51,7 +49,7 @@ val with_connection_ez :
   ?crypto:(module CRYPTO) ->
   ?binary:bool ->
   ?extra_headers:Headers.t ->
-  ?hb_ns:Int63.t ->
+  ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
   Uri.t ->
   f:(string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
   'a Deferred.t

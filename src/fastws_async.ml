@@ -16,7 +16,7 @@ module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 type t =
   | Header of Fastws.t
-  | Payload of Bigstring.t
+  | Payload of Bigstring.t [@@deriving sexp]
 
 let header = function Header _ -> true | _ -> false
 
@@ -197,8 +197,6 @@ let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
   Monitor.protect (fun () -> f w)
     ~finally:(fun () -> Pipe.close w ; Pipe.closed w)
 
-exception Timeout of Int63.t
-
 type st = {
   buf : Bigbuffer.t ;
   mutable header : Fastws.t option ;
@@ -227,7 +225,9 @@ let reassemble k st t =
     st.header <- Some h ;
     st.to_read <- h.length ;
     k st `Continue
-  | Payload _, None -> k st (`Fail "payload without a header")
+  | Payload _, None ->
+    Log.err (fun m -> m "Got %a" Sexplib.Sexp.pp (sexp_of_t t)) ;
+    k st (`Fail "payload without a header")
   | Payload b, Some h ->
     let buflen = Bigstring.length b in
     match h.final && buflen = st.to_read with
@@ -242,6 +242,8 @@ let reassemble k st t =
       st.to_read <- st.to_read - buflen ;
       k st `Continue
 
+let pongs_expected = ref String.Set.empty
+
 let process
     cleaning_up cleaned_up last_pong client_w ws_w ({ header ; payload } as frame) =
   match header.opcode with
@@ -253,7 +255,20 @@ let process
     Ivar.fill_if_empty cleaned_up ()
   | Pong ->
     last_pong := Time_stamp_counter.now () ;
-    Deferred.unit
+    begin match frame with
+      | { payload = None ; _ } -> Deferred.unit
+      | { payload = Some payload ; _ } ->
+        assert (Bigstring.length payload = header.length) ;
+        let payload_string = Bigstring.to_string payload in
+        if String.Set.mem !pongs_expected payload_string then begin
+          pongs_expected := String.Set.remove !pongs_expected payload_string ;
+          Deferred.unit
+        end
+        else
+          Logs_async.err (fun m -> m "Received wrong data in pong") >>| fun () ->
+          Pipe.close ws_w ;
+          Pipe.close client_w
+    end
   | Text
   | Binary -> begin match frame with
       | { payload = None ; _ } -> Deferred.unit
@@ -269,14 +284,15 @@ let process
     Pipe.close ws_w ;
     Pipe.close client_w
 
-let heartbeat calibrator w m last_pong cleaned_up span =
-  Clock_ns.every
-    ~stop:(Ivar.read cleaned_up)
-    (Time_ns.Span.of_int_sec 60)
-    (fun () -> Time_stamp_counter.Calibrator.calibrate calibrator) ;
+let heartbeat calibrator w terminate last_pong cleanup cleaned_up span =
   let send_ping () =
     let now = Time_stamp_counter.now () in
-    Pipe.write_if_open w (Header (create Ping)) >>= fun () ->
+    Pipe.write_if_open w (Header (create ~length:8 Ping)) >>= fun () ->
+    let buf = Bigstring.create 8 in
+    Bigstring.set_int64_le buf ~pos:0 (Random.bits ()) ;
+    pongs_expected :=
+      String.Set.add !pongs_expected (Bigstring.to_string buf) ;
+    Pipe.write_if_open w (Payload buf) >>= fun () ->
     let elapsed = Time_stamp_counter.diff now !last_pong in
     let elapsed =
       Time_stamp_counter.Span.to_ns ~calibrator elapsed in
@@ -286,7 +302,8 @@ let heartbeat calibrator w m last_pong cleaned_up span =
         m "No pong received to ping request after %a ns, closing"
           Int63.pp elapsed
       end >>| fun () ->
-      Monitor.send_exn m (Timeout elapsed)
+      cleanup () ;
+      Ivar.fill terminate ()
     end
   in
   Clock_ns.run_at_intervals'
@@ -340,14 +357,15 @@ let connect_ez
   don't_wait_for begin
     Monitor.try_with ~here:[%here] begin fun () ->
       with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
-        Option.iter hb_ns ~f:begin
-          heartbeat (Lazy.force Time_stamp_counter.calibrator)
-            w (Monitor.current ()) last_pong cleaned_up
+        let hb_terminate = Ivar.create () in
+        Option.iter hb_ns ~f:begin fun (c, v) ->
+          heartbeat c w hb_terminate last_pong cleanup cleaned_up v
         end ;
         Ivar.fill initialized () ;
         don't_wait_for (assemble_frames binary ws_read w) ;
-        Deferred.all_unit
-          Pipe.[ closed client_read ; closed client_write ] >>= fun () ->
+        Deferred.any_unit [
+          Ivar.read hb_terminate ;
+          Deferred.all_unit Pipe.[ closed client_read ; closed client_write ] ] >>= fun () ->
         begin
           if Pipe.is_closed w then Deferred.unit
           else write_frame w (close "")
