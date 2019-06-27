@@ -123,27 +123,32 @@ let run stream extra_headers initialized ws_r client_w handle url _sock _conn r 
   | true ->
     Ivar.fill initialized () ;
     Log_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
-    don't_wait_for begin
-      Pipe.fold ws_r ~f:begin fun hdr -> function
-        | Header t ->
+    let rec read_frames hdr =
+      if Writer.is_closed w then Deferred.unit
+      else
+        Pipe.read ws_r >>= function
+        | `Eof -> Deferred.unit
+        | `Ok (Header t) ->
           let mask = Crypto.(to_string (generate 4)) in
           let h = { t with mask = Some mask } in
           serialize stream h ;
           flush stream w >>= fun () ->
-          Log_async.debug (fun m -> m "-> %a" pp t) >>| fun () ->
-          Some h
-        | Payload buf ->
+          Log_async.debug (fun m -> m "-> %a" pp t) >>= fun () ->
+          read_frames (Some h)
+        | `Ok (Payload buf) ->
           match hdr with
           | Some { mask = Some mask ; _ } ->
             xormask ~mask buf ;
             Faraday.write_bigstring stream buf ;
             xormask ~mask buf ;
-            flush stream w >>| fun () ->
-            hdr
-          | _ ->
-            failwith "current header must exist"
-      end ~init:None >>= fun _ ->
-      Deferred.unit
+            flush stream w >>= fun () ->
+            read_frames hdr
+          | _ -> failwith "current header must exist"
+    in
+    don't_wait_for begin
+      try_with (fun () -> read_frames None) >>= function
+      | Ok _ -> Deferred.unit
+      | Error exn -> Log_async.err (fun m -> m "%a" Exn.pp exn)
     end ;
     let len_to_read = ref 0 in
     let need = function
@@ -186,7 +191,7 @@ let connect
     Monitor.protect ~here:[%here] begin fun () ->
       Async_uri.with_connection url
         (run stream extra_headers initialized ws_r client_w handle url)
-    end ~finally:(fun () -> Pipe.close client_w ; Deferred.unit) in
+    end ~finally:(fun () -> Pipe.close_read ws_r ; Deferred.unit) in
   Deferred.any_unit [ conn ; Ivar.read initialized ] >>| fun () ->
   client_w
 
