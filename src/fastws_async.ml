@@ -187,10 +187,8 @@ let connect
       Async_uri.with_connection url
         (run stream extra_headers initialized ws_r client_w handle url)
     end ~finally:(fun () -> Pipe.close client_w ; Deferred.unit) in
-  Deferred.any_unit [ conn ;  Ivar.read initialized ] >>= fun () ->
-  match Ivar.is_full initialized with
-  | true -> return client_w
-  | false -> failwith "tcp connect timeout"
+  Deferred.any_unit [ conn ; Ivar.read initialized ] >>| fun () ->
+  client_w
 
 let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
   connect ?stream ?extra_headers ?crypto ~handle uri >>= fun w ->
