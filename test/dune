@@ -1,6 +1,16 @@
 (test
  (name       test)
  (modules    test)
- (preprocess (pps ppx_sexp_conv))
+ (preprocess (pps ppx_let ppx_sexp_conv))
  (package    fastws-async)
  (libraries logs-async-reporter fastws-async alcotest-async))
+
+(executables
+ (names leak)
+ (public_names leak-test)
+ (modules leak)
+ (preprocess (pps ppx_let ppx_sexp_conv))
+ (package fastws-async)
+ (libraries
+   logs-async-reporter
+   fastws-async))

@@ -174,7 +174,10 @@ let run stream extra_headers initialized ws_r client_w handle url _sock _conn r 
           else
             return (`Consumed (len, `Need_unknown))
     in
-    Reader.read_one_chunk_at_a_time r ~handle_chunk >>= function
+    Deferred.any [
+      (Pipe.closed client_w >>| fun () ->  `Eof) ;
+      Reader.read_one_chunk_at_a_time r ~handle_chunk
+    ]  >>= function
     | `Eof
     | `Eof_with_unconsumed_data _ -> Deferred.unit
     | `Stopped _ -> Log_async.err (fun m -> m "Connection terminated")

@@ -27,6 +27,7 @@ val connect :
   handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   Uri.t ->
   t Pipe.Writer.t Deferred.t
+(** Closing the resulting writer closes the Websocket connection. *)
 
 val with_connection :
   ?stream:Faraday.t ->
