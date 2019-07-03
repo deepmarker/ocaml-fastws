@@ -21,6 +21,7 @@ val reassemble :
   st -> t -> 'a
 
 val connect :
+  ?timeout:Time_ns.Span.t ->
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->

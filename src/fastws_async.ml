@@ -31,34 +31,31 @@ let merge_headers h1 h2 =
     Headers.add_unless_exists a k v
   end h1
 
-let response_handler iv nonce crypto
-    ({ Response.version ; status ; headers ; _ } as response) _body =
+let response_handler iv nonce crypto r _body =
   let module Crypto = (val crypto : CRYPTO) in
-  Log.debug (fun m -> m "%a" Response.pp_hum response) ;
-  let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get headers "upgrade") in
-  let sec_ws_accept_hdr = Headers.get headers "sec-websocket-accept" in
+  Log.debug (fun m -> m "%a" Response.pp_hum r) ;
+  let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get r.headers "upgrade") in
+  let sec_ws_accept_hdr = Headers.get r.headers "sec-websocket-accept" in
   let expected_sec =
     Base64.encode_exn (Crypto.(sha_1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
-  match version, status, upgrade_hdr, sec_ws_accept_hdr with
-  | { major = 1 ; minor = 1 },
-    `Switching_protocols,
-    Some "websocket",
-    Some v when v = expected_sec ->
-    Ivar.fill_if_empty iv true
+  match r.version, r.status, upgrade_hdr, sec_ws_accept_hdr with
+  | { major = 1 ; minor = 1 }, `Switching_protocols,
+    Some "websocket", Some v when v = expected_sec ->
+    Ivar.fill_if_empty iv (Ok r)
   | _ ->
-    Log.err (fun m -> m "Invalid response %a" Response.pp_hum response) ;
-    Ivar.fill_if_empty iv false
+    Log.err (fun m -> m "Invalid response %a" Response.pp_hum r) ;
+    Ivar.fill_if_empty iv (Error (`Response r))
+
+let pp_client_connection_error ppf = function
+  | `Exn e ->
+    Format.fprintf ppf "Exception %a" Exn.pp e
+  | `Invalid_response_body_length resp ->
+    Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
+  | `Malformed_response msg ->
+    Format.fprintf ppf "Malformed response %s" msg
 
 let error_handler signal e =
-  begin match e with
-    | `Exn e ->
-      Log.err (fun m -> m "Exception %a" Exn.pp e) ;
-    | `Invalid_response_body_length resp ->
-      Log.err (fun m -> m "Invalid response body length %a" Response.pp_hum resp)
-    | `Malformed_response msg ->
-      Log.err (fun m -> m "Malformed response %s" msg)
-  end ;
-  Ivar.fill_if_empty signal false
+  Ivar.fill_if_empty signal (Error (`HTTP e))
 
 let write_iovec w iovec =
   List.fold_left iovec ~init:0 ~f:begin fun a { Faraday.buffer ; off ; len } ->
@@ -99,7 +96,30 @@ let rec flush stream w =
     Faraday.shift stream nb_read ;
     flush stream w
 
-let run stream extra_headers initialized ws_r client_w handle url _sock _conn r w =
+let read_frames stream w ws_r =
+  let rec inner hdr =
+    Pipe.read ws_r >>= function
+    | `Eof -> Deferred.unit
+    | `Ok (Header t) ->
+      let mask = Crypto.(to_string (generate 4)) in
+      let h = { t with mask = Some mask } in
+      serialize stream h ;
+      flush stream w >>= fun () ->
+      Log_async.debug (fun m -> m "-> %a" pp t) >>= fun () ->
+      inner (Some h)
+    | `Ok (Payload buf) ->
+      match hdr with
+      | Some { mask = Some mask ; _ } ->
+        xormask ~mask buf ;
+        Faraday.write_bigstring stream buf ;
+        xormask ~mask buf ;
+        flush stream w >>= fun () ->
+        inner hdr
+      | _ -> failwith "current header must exist" in
+  if Writer.is_closed w then Deferred.unit
+  else inner None
+
+let run timeout stream extra_headers initialized ws_r client_w handle url r w =
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
     Option.value_map ~default:extra_headers (Uri.host url)
@@ -115,38 +135,14 @@ let run stream extra_headers initialized ws_r client_w handle url _sock _conn r 
   don't_wait_for (read_response conn r) ;
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
   Deferred.any [ Ivar.read ok ;
-                 Clock_ns.after (Time_ns.Span.of_int_sec 10) >>| fun () ->
-                 false ] >>= function
-  | false ->
-    if Ivar.is_full ok then failwith "Invalid handshake"
-    else failwith "endpoint does not respond"
-  | true ->
+                 Clock_ns.after timeout >>| fun () ->
+                 Error (`Timeout timeout) ] >>= function
+  | Error e -> return (Error e)
+  | Ok _ ->
     Ivar.fill initialized () ;
     Log_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
-    let rec read_frames hdr =
-      if Writer.is_closed w then Deferred.unit
-      else
-        Pipe.read ws_r >>= function
-        | `Eof -> Deferred.unit
-        | `Ok (Header t) ->
-          let mask = Crypto.(to_string (generate 4)) in
-          let h = { t with mask = Some mask } in
-          serialize stream h ;
-          flush stream w >>= fun () ->
-          Log_async.debug (fun m -> m "-> %a" pp t) >>= fun () ->
-          read_frames (Some h)
-        | `Ok (Payload buf) ->
-          match hdr with
-          | Some { mask = Some mask ; _ } ->
-            xormask ~mask buf ;
-            Faraday.write_bigstring stream buf ;
-            xormask ~mask buf ;
-            flush stream w >>= fun () ->
-            read_frames hdr
-          | _ -> failwith "current header must exist"
-    in
     don't_wait_for begin
-      try_with (fun () -> read_frames None) >>= function
+      try_with (fun () -> read_frames stream w ws_r) >>= function
       | Ok _ -> Deferred.unit
       | Error exn -> Log_async.err (fun m -> m "%a" Exn.pp exn)
     end ;
@@ -175,14 +171,20 @@ let run stream extra_headers initialized ws_r client_w handle url _sock _conn r 
             return (`Consumed (len, `Need_unknown))
     in
     Deferred.any [
-      (Pipe.closed client_w >>| fun () ->  `Eof) ;
+      (Pipe.closed client_w >>| fun () -> `Eof) ;
       Reader.read_one_chunk_at_a_time r ~handle_chunk
-    ]  >>= function
-    | `Eof
-    | `Eof_with_unconsumed_data _ -> Deferred.unit
-    | `Stopped _ -> Log_async.err (fun m -> m "Connection terminated")
+    ] >>| fun v -> Ok v
+
+let pp_run_error ppf = function
+  | `HTTP e ->
+    Format.fprintf ppf "HTTP error %a" pp_client_connection_error e
+  | `Response r ->
+    Format.fprintf ppf "Response error %a" Response.pp_hum r
+  | `Timeout t ->
+    Format.fprintf ppf "Timeout after %a" Time_ns.Span.pp t
 
 let connect
+    ?(timeout=Time_ns.Span.of_int_sec 10)
     ?(stream = Faraday.create 4096)
     ?(crypto = (module Crypto : CRYPTO))
     ?(extra_headers = Headers.empty)
@@ -192,8 +194,12 @@ let connect
   let ws_r, client_w = Pipe.create () in
   let conn =
     Monitor.protect ~here:[%here] begin fun () ->
-      Async_uri.with_connection url
-        (run stream extra_headers initialized ws_r client_w handle url)
+      Async_uri.with_connection url begin fun _sock _conn r w ->
+        run timeout stream extra_headers
+          initialized ws_r client_w handle url r w >>= function
+        | Error e -> Log_async.err (fun m -> m "%a" pp_run_error e)
+        | Ok _ -> Deferred.unit
+      end
     end ~finally:(fun () -> Pipe.close_read ws_r ; Deferred.unit) in
   Deferred.any_unit [ conn ; Ivar.read initialized ] >>| fun () ->
   client_w
