@@ -20,6 +20,13 @@ val reassemble :
   (st -> [`Continue | `Fail of string | `Frame of frame] -> 'a) ->
   st -> t -> 'a
 
+type error =
+  | HTTP of Client_connection.error
+  | Response of Response.t
+  | Timeout of Time_ns.Span.t
+
+exception WS_error of error
+
 val connect :
   ?timeout:Time_ns.Span.t ->
   ?stream:Faraday.t ->
@@ -27,7 +34,7 @@ val connect :
   ?extra_headers:Headers.t ->
   handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   Uri.t ->
-  t Pipe.Writer.t Deferred.t
+  (t Pipe.Writer.t, error) result Deferred.t
 (** Closing the resulting writer closes the Websocket connection. *)
 
 val with_connection :
@@ -37,7 +44,7 @@ val with_connection :
   handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   f:(t Pipe.Writer.t -> 'a Deferred.t) ->
   Uri.t ->
-  'a Deferred.t
+  ('a, [`Exn of exn | `WS of error]) result Deferred.t
 
 val connect_ez :
   ?crypto:(module CRYPTO) ->
@@ -45,7 +52,8 @@ val connect_ez :
   ?extra_headers:Headers.t ->
   ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
   Uri.t ->
-  (string Pipe.Reader.t * string Pipe.Writer.t * unit Deferred.t) Deferred.t
+  (string Pipe.Reader.t *
+   string Pipe.Writer.t * unit Deferred.t) Deferred.t
 
 val with_connection_ez :
   ?crypto:(module CRYPTO) ->

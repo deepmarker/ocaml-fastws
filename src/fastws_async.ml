@@ -18,6 +18,24 @@ type t =
   | Header of Fastws.t
   | Payload of Bigstring.t [@@deriving sexp]
 
+type error =
+  | HTTP of Client_connection.error
+  | Response of Response.t
+  | Timeout of Time_ns.Span.t
+
+exception WS_error of error
+
+let pp_client_connection_error ppf (e : Client_connection.error) =
+  match e with
+  | `Exn e -> Format.fprintf ppf "Exception %a" Exn.pp e
+  | `Invalid_response_body_length resp -> Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
+  | `Malformed_response msg -> Format.fprintf ppf "Malformed response %s" msg
+
+let pp_print_error ppf = function
+  | HTTP e -> Format.fprintf ppf "HTTP error %a" pp_client_connection_error e
+  | Response r -> Format.fprintf ppf "Response error %a" Response.pp_hum r
+  | Timeout t -> Format.fprintf ppf "Timeout after %a" Time_ns.Span.pp t
+
 let header = function Header _ -> true | _ -> false
 
 let write_frame w { header ; payload } =
@@ -44,18 +62,10 @@ let response_handler iv nonce crypto r _body =
     Ivar.fill_if_empty iv (Ok r)
   | _ ->
     Log.err (fun m -> m "Invalid response %a" Response.pp_hum r) ;
-    Ivar.fill_if_empty iv (Error (`Response r))
-
-let pp_client_connection_error ppf = function
-  | `Exn e ->
-    Format.fprintf ppf "Exception %a" Exn.pp e
-  | `Invalid_response_body_length resp ->
-    Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
-  | `Malformed_response msg ->
-    Format.fprintf ppf "Malformed response %s" msg
+    Ivar.fill_if_empty iv (Error (Response r))
 
 let error_handler signal e =
-  Ivar.fill_if_empty signal (Error (`HTTP e))
+  Ivar.fill_if_empty signal (Error (HTTP e))
 
 let write_iovec w iovec =
   List.fold_left iovec ~init:0 ~f:begin fun a { Faraday.buffer ; off ; len } ->
@@ -136,7 +146,7 @@ let run timeout stream extra_headers initialized ws_r client_w handle url r w =
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
   Deferred.any [ Ivar.read ok ;
                  Clock_ns.after timeout >>| fun () ->
-                 Error (`Timeout timeout) ] >>= function
+                 Error (Timeout timeout) ] >>= function
   | Error e -> return (Error e)
   | Ok _ ->
     Ivar.fill initialized () ;
@@ -175,14 +185,6 @@ let run timeout stream extra_headers initialized ws_r client_w handle url r w =
       Reader.read_one_chunk_at_a_time r ~handle_chunk
     ] >>| fun v -> Ok v
 
-let pp_run_error ppf = function
-  | `HTTP e ->
-    Format.fprintf ppf "HTTP error %a" pp_client_connection_error e
-  | `Response r ->
-    Format.fprintf ppf "Response error %a" Response.pp_hum r
-  | `Timeout t ->
-    Format.fprintf ppf "Timeout after %a" Time_ns.Span.pp t
-
 let connect
     ?(timeout=Time_ns.Span.of_int_sec 10)
     ?(stream = Faraday.create 4096)
@@ -196,18 +198,24 @@ let connect
     Monitor.protect ~here:[%here] begin fun () ->
       Async_uri.with_connection url begin fun _sock _conn r w ->
         run timeout stream extra_headers
-          initialized ws_r client_w handle url r w >>= function
-        | Error e -> Log_async.err (fun m -> m "%a" pp_run_error e)
-        | Ok _ -> Deferred.unit
+          initialized ws_r client_w handle url r w
       end
     end ~finally:(fun () -> Pipe.close_read ws_r ; Deferred.unit) in
-  Deferred.any_unit [ conn ; Ivar.read initialized ] >>| fun () ->
-  client_w
+  Deferred.any [ (conn >>= fun c -> return (Error c)) ;
+                 Ivar.read initialized >>| fun () -> Ok () ] >>| function
+  | Error (Ok _) -> assert false
+  | Error (Error e) -> Error e
+  | Ok () -> Ok client_w
 
 let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
-  connect ?stream ?extra_headers ?crypto ~handle uri >>= fun w ->
-  Monitor.protect (fun () -> f w)
-    ~finally:(fun () -> Pipe.close w ; Pipe.closed w)
+  connect ?stream ?extra_headers ?crypto ~handle uri >>= function
+  | Error e -> return (Error (`WS e))
+  | Ok w ->
+    try_with (fun () -> f w) >>= function
+    | Error e ->
+      Pipe.close w ;
+      return (Error (`Exn e))
+    | Ok v -> return (Ok v)
 
 type st = {
   buf : Bigbuffer.t ;
@@ -386,13 +394,20 @@ let connect_ez
         Ivar.fill_if_empty cleaning_up ()
       end
     end >>= function
-    | Error exn ->
+    | Error exn
+    | Ok (Error (`Exn exn)) ->
       Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
       cleanup () ;
       Ivar.fill_if_empty cleaned_up () ;
       Monitor.send_exn m exn ;
       Deferred.unit
-    | Ok () ->
+    | Ok (Error (`WS error)) ->
+      Log_async.err (fun m -> m "%a" pp_print_error error) >>= fun () ->
+      cleanup () ;
+      Ivar.fill_if_empty cleaned_up () ;
+      Monitor.send_exn m (WS_error error) ;
+      Deferred.unit
+    | Ok _ ->
       cleanup () ;
       Ivar.fill_if_empty cleaned_up () ;
       Deferred.unit

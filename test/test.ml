@@ -107,14 +107,18 @@ let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ()
 
 let connect () =
   let mv = Mvar.create () in
-  Fastws_async.connect ~handle:(handle_incoming_frame mv) url >>=
-  connect_f mv
+  Fastws_async.connect ~handle:(handle_incoming_frame mv) url >>= function
+  | Error e -> raise (Fastws_async.WS_error e)
+  | Ok p -> connect_f mv p
 
 let with_connection () =
   let mv = Mvar.create () in
   Fastws_async.with_connection url
     ~handle:(handle_incoming_frame mv)
-    ~f:(connect_f mv)
+    ~f:(connect_f mv) >>| function
+  | Ok () -> ()
+  | Error (`Exn exn) -> raise exn
+  | Error (`WS e) -> raise (Fastws_async.WS_error e)
 
 let connect_ez () =
   Fastws_async.connect_ez url >>= fun (r, w, terminated) ->
