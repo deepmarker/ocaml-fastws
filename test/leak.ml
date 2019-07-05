@@ -7,7 +7,9 @@ let uri = Uri.make ~scheme:"https" ~host:"ws-beta.kraken.com" ()
 
 let rec loop () =
   Logs_async.app (fun m -> m "Connecting to %a" Uri.pp uri) >>= fun () ->
-  Fastws_async.connect_ez uri >>= fun (r, w, _) ->
+  Fastws_async.connect_ez uri >>= function
+  | Error _ -> assert false
+  | Ok (r, w, _) ->
   Logs_async.app (fun m -> m "Connected to %a" Uri.pp uri) >>= fun () ->
   Clock_ns.after (Time_ns.Span.of_int_sec 3) >>= fun () ->
   Pipe.close_read r;

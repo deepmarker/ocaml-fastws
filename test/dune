@@ -6,9 +6,9 @@
  (libraries logs-async-reporter fastws-async alcotest-async))
 
 (executables
- (names leak)
- (public_names leak-test)
- (modules leak)
+ (names leak wscat)
+ (public_names leak-test wscat)
+ (modules leak wscat)
  (preprocess (pps ppx_let ppx_sexp_conv))
  (package fastws-async)
  (libraries

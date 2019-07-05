@@ -1,6 +1,7 @@
 open Async
 open Alcotest
 open Fastws
+open Fastws_async
 
 let () =
   Logs.set_level (Some Debug) ;
@@ -103,12 +104,12 @@ let handle_incoming_frame mv _w = function
   | Payload pld ->
     Mvar.put mv (Payload (Bigstringaf.(copy pld ~off:0 ~len:(length pld))))
 
-let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ()
+let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 
 let connect () =
   let mv = Mvar.create () in
   Fastws_async.connect ~handle:(handle_incoming_frame mv) url >>= function
-  | Error e -> raise (Fastws_async.WS_error e)
+  | Error _ -> fail "connect"
   | Ok p -> connect_f mv p
 
 let with_connection () =
@@ -117,20 +118,24 @@ let with_connection () =
     ~handle:(handle_incoming_frame mv)
     ~f:(connect_f mv) >>| function
   | Ok () -> ()
-  | Error (`Exn exn) -> raise exn
-  | Error (`WS e) -> raise (Fastws_async.WS_error e)
+  | Error (`User_callback exn) -> raise exn
+  | Error (`WS e) -> fail (Format.asprintf "%a" pp_print_error e)
 
 let connect_ez () =
-  Fastws_async.connect_ez url >>= fun (r, w, terminated) ->
-  let msg = "msg" in
-  Pipe.write w msg >>= fun () ->
-  Pipe.read r >>= fun res ->
-  Pipe.close w ;
-  Pipe.close_read r ;
-  terminated >>| fun () ->
-  match res with
-  | `Eof -> failwith "did not receive echo"
-  | `Ok msg' -> check string "" msg msg'
+  Fastws_async.connect_ez url >>= function
+  | Error `Internal exn -> raise exn
+  | Error (`WS e) ->
+    fail (Format.asprintf "%a" pp_print_error e)
+  | Ok (r, w, terminated) ->
+    let msg = "msg" in
+    Pipe.write w msg >>= fun () ->
+    Pipe.read r >>= fun res ->
+    Pipe.close w ;
+    Pipe.close_read r ;
+    terminated >>| fun () ->
+    match res with
+    | `Eof -> failwith "did not receive echo"
+    | `Ok msg' -> check string "" msg msg'
 
 let with_connection_ez () =
   let msg = "msg" in
@@ -139,7 +144,11 @@ let with_connection_ez () =
     Pipe.read r >>| function
     | `Eof -> failwith "did not receive echo"
     | `Ok msg' -> check string "" msg msg'
-  end
+  end >>= function
+  | Error `Internal exn -> raise exn
+  | Error (`User_callback exn) -> raise exn
+  | Error (`WS e) -> fail (Format.asprintf "%a" pp_print_error e)
+  | Ok () -> Deferred.unit
 
 let roundtrip_unmasked =
   List.map

@@ -25,7 +25,7 @@ type error =
   | Response of Response.t
   | Timeout of Time_ns.Span.t
 
-exception WS_error of error
+val pp_print_error : Format.formatter -> error -> unit
 
 val connect :
   ?timeout:Time_ns.Span.t ->
@@ -44,7 +44,7 @@ val with_connection :
   handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   f:(t Pipe.Writer.t -> 'a Deferred.t) ->
   Uri.t ->
-  ('a, [`Exn of exn | `WS of error]) result Deferred.t
+  ('a, [`User_callback of exn | `WS of error]) result Deferred.t
 
 val connect_ez :
   ?crypto:(module CRYPTO) ->
@@ -52,8 +52,8 @@ val connect_ez :
   ?extra_headers:Headers.t ->
   ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
   Uri.t ->
-  (string Pipe.Reader.t *
-   string Pipe.Writer.t * unit Deferred.t) Deferred.t
+  (string Pipe.Reader.t * string Pipe.Writer.t * unit Deferred.t,
+   [`Internal of exn | `WS of error]) result Deferred.t
 
 val with_connection_ez :
   ?crypto:(module CRYPTO) ->
@@ -62,4 +62,4 @@ val with_connection_ez :
   ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
   Uri.t ->
   f:(string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
-  'a Deferred.t
+  ('a, [`Internal of exn | `User_callback of exn | `WS of error]) result Deferred.t

@@ -23,8 +23,6 @@ type error =
   | Response of Response.t
   | Timeout of Time_ns.Span.t
 
-exception WS_error of error
-
 let pp_client_connection_error ppf (e : Client_connection.error) =
   match e with
   | `Exn e -> Format.fprintf ppf "Exception %a" Exn.pp e
@@ -214,7 +212,7 @@ let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
     try_with (fun () -> f w) >>= function
     | Error e ->
       Pipe.close w ;
-      return (Error (`Exn e))
+      return (Error (`User_callback e))
     | Ok v -> return (Ok v)
 
 type st = {
@@ -373,53 +371,54 @@ let connect_ez
         | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
       end !state t in
     fun w t -> inner w t in
-  let m = Monitor.current () in
-  don't_wait_for begin
-    Monitor.try_with ~here:[%here] begin fun () ->
-      with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
-        let hb_terminate = Ivar.create () in
-        Option.iter hb_ns ~f:begin fun (c, v) ->
-          heartbeat c w hb_terminate last_pong cleanup cleaned_up v
-        end ;
-        Ivar.fill initialized () ;
-        don't_wait_for (assemble_frames binary ws_read w) ;
-        Deferred.any_unit [
-          Ivar.read hb_terminate ;
-          Deferred.all_unit Pipe.[ closed client_read ;
-                                   closed client_write ] ] >>= fun () ->
-        begin
-          if Pipe.is_closed w then Deferred.unit
-          else write_frame w (close "")
-        end >>| fun () ->
-        Ivar.fill_if_empty cleaning_up ()
-      end
-    end >>= function
-    | Error exn
-    | Ok (Error (`Exn exn)) ->
-      Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
-      cleanup () ;
-      Ivar.fill_if_empty cleaned_up () ;
-      Monitor.send_exn m exn ;
-      Deferred.unit
-    | Ok (Error (`WS error)) ->
-      Log_async.err (fun m -> m "%a" pp_print_error error) >>= fun () ->
-      cleanup () ;
-      Ivar.fill_if_empty cleaned_up () ;
-      Monitor.send_exn m (WS_error error) ;
-      Deferred.unit
-    | Ok _ ->
+  let inner () =
+    with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
+      let hb_terminate = Ivar.create () in
+      Option.iter hb_ns ~f:begin fun (c, v) ->
+        heartbeat c w hb_terminate last_pong cleanup cleaned_up v
+      end ;
+      Ivar.fill initialized () ;
+      don't_wait_for (assemble_frames binary ws_read w) ;
+      Deferred.any_unit [
+        Ivar.read hb_terminate ;
+        Deferred.all_unit Pipe.[ closed client_read ;
+                                 closed client_write ] ] >>= fun () ->
+      begin
+        if Pipe.is_closed w then Deferred.unit
+        else write_frame w (close "")
+      end >>| fun () ->
+      Ivar.fill_if_empty cleaning_up ()
+    end in
+  let conn = Monitor.protect inner ~finally:begin fun () ->
       cleanup () ;
       Ivar.fill_if_empty cleaned_up () ;
       Deferred.unit
-  end ;
-  Ivar.read initialized >>| fun () ->
-  client_read, client_write, Ivar.read cleaned_up
+    end in
+  Deferred.any [
+    (Ivar.read initialized >>| fun () -> Ok ()) ;
+    conn
+  ] >>| function
+  | Error (`WS e) -> Error (`WS e)
+  | Error (`User_callback e) -> Error (`Internal e)
+  | Ok () -> Ok (client_read, client_write, Ivar.read cleaned_up)
 
 let with_connection_ez
     ?(crypto=(module Crypto : CRYPTO))
     ?binary ?extra_headers ?hb_ns uri ~f =
-  connect_ez
-    ?binary ?extra_headers ?hb_ns ~crypto uri >>= fun (r, w, cleaned_up) ->
-  Monitor.protect ~here:[%here]
-    ~finally:(fun () -> Pipe.close_read r ; Pipe.close w ; cleaned_up)
-    (fun () -> f r w)
+  connect_ez ?binary ?extra_headers ?hb_ns ~crypto uri >>= function
+  | Error e -> return (Error e)
+  | Ok (r, w, cleaned_up) ->
+    Deferred.any [
+      (cleaned_up >>| fun () -> Error Exit) ;
+      try_with (fun () -> f r w)
+    ] >>= function
+    | Error e ->
+      Pipe.close_read r ;
+      Pipe.close w ;
+      cleaned_up >>| fun () ->
+      Error (`User_callback e)
+    | Ok v ->
+      Pipe.close_read r ;
+      Pipe.close w ;
+      cleaned_up >>| fun () -> Ok v
+
