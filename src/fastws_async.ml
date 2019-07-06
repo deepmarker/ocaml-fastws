@@ -34,6 +34,9 @@ let pp_print_error ppf = function
   | Response r -> Format.fprintf ppf "Response error %a" Response.pp_hum r
   | Timeout t -> Format.fprintf ppf "Timeout after %a" Time_ns.Span.pp t
 
+let raise_error e =
+  failwith (Format.asprintf "%a" pp_print_error e)
+
 let header = function Header _ -> true | _ -> false
 
 let write_frame w { header ; payload } =

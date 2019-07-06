@@ -26,6 +26,7 @@ type error =
   | Timeout of Time_ns.Span.t
 
 val pp_print_error : Format.formatter -> error -> unit
+val raise_error : error -> 'a
 
 val connect :
   ?timeout:Time_ns.Span.t ->
