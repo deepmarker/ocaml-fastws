@@ -98,7 +98,7 @@ let connect_f mv w =
     check frame "" msg msg'
   | _ -> failwith "wrong message sequence"
 
-let handle_incoming_frame mv _w = function
+let handle_incoming_frame mv = function
   | Fastws_async.Header _ as fr ->
     Mvar.put mv fr
   | Payload pld ->
@@ -108,15 +108,22 @@ let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 
 let connect () =
   let mv = Mvar.create () in
-  Fastws_async.connect ~handle:(handle_incoming_frame mv) url >>= function
+  Fastws_async.connect url >>= function
   | Error _ -> fail "connect"
-  | Ok p -> connect_f mv p
+  | Ok (r, w) ->
+    Deferred.all_unit [
+      connect_f mv w ;
+      Pipe.iter r ~f:(handle_incoming_frame mv) ;
+    ]
 
 let with_connection () =
   let mv = Mvar.create () in
-  Fastws_async.with_connection url
-    ~handle:(handle_incoming_frame mv)
-    ~f:(connect_f mv) >>| function
+  Fastws_async.with_connection url ~f:begin fun r w ->
+    Deferred.all_unit [
+      connect_f mv w ;
+      Pipe.iter r ~f:(handle_incoming_frame mv) ;
+    ]
+  end >>| function
   | Ok () -> ()
   | Error (`User_callback exn) -> raise exn
   | Error (`WS e) -> fail (Format.asprintf "%a" pp_print_error e)

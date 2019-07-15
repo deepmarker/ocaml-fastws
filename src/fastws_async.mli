@@ -33,17 +33,15 @@ val connect :
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
-  handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
   Uri.t ->
-  (t Pipe.Writer.t, error) result Deferred.t
+  (t Pipe.Reader.t * t Pipe.Writer.t, error) result Deferred.t
 (** Closing the resulting writer closes the Websocket connection. *)
 
 val with_connection :
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
-  handle:(t Pipe.Writer.t -> t -> unit Deferred.t) ->
-  f:(t Pipe.Writer.t -> 'a Deferred.t) ->
+  f:(t Pipe.Reader.t -> t Pipe.Writer.t -> 'a Deferred.t) ->
   Uri.t ->
   ('a, [`User_callback of exn | `WS of error]) result Deferred.t
 

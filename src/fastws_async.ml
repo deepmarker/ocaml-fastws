@@ -133,7 +133,7 @@ let read_frames stream w ws_r =
   if Writer.is_closed w then Deferred.unit
   else inner None
 
-let run timeout stream extra_headers initialized ws_r client_w handle url r w =
+let run timeout stream extra_headers initialized ws_r ws_w url r w =
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
     Option.value_map ~default:extra_headers (Uri.host url)
@@ -170,14 +170,14 @@ let run timeout stream extra_headers initialized ws_r client_w handle url r w =
         len_to_read := !len_to_read - will_read ;
         let payload = Bigstring.sub_shared buf
             ~pos:(pos+already_read) ~len:will_read in
-        handle client_w (Payload payload) >>= fun () ->
+        Pipe.write_if_open ws_w (Payload payload) >>= fun () ->
         return (`Consumed (already_read + will_read, need !len_to_read)) in
       if !len_to_read > 0 then read_max 0 else
         match parse buf ~pos ~len with
         | `More n -> return (`Consumed (0, `Need (len + n)))
         | `Ok (t, read) ->
           Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
-          handle client_w (Header t) >>= fun () ->
+          Pipe.write_if_open ws_w (Header t) >>= fun () ->
           len_to_read := t.length ;
           if read < len then
             read_max read
@@ -185,7 +185,7 @@ let run timeout stream extra_headers initialized ws_r client_w handle url r w =
             return (`Consumed (len, `Need_unknown))
     in
     Deferred.any [
-      (Pipe.closed client_w >>| fun () -> `Eof) ;
+      (Pipe.closed ws_w >>| fun () -> `Eof) ;
       Reader.read_one_chunk_at_a_time r ~handle_chunk
     ] >>| fun v -> Ok v
 
@@ -193,33 +193,40 @@ let connect
     ?(timeout=Time_ns.Span.of_int_sec 10)
     ?(stream = Faraday.create 4096)
     ?(crypto = (module Crypto : CRYPTO))
-    ?(extra_headers = Headers.empty)
-    ~handle url =
+    ?(extra_headers = Headers.empty) url =
   let module Crypto = (val crypto : CRYPTO) in
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
+  let client_r, ws_w = Pipe.create () in
   let conn =
     Monitor.protect ~here:[%here] begin fun () ->
       Async_uri.with_connection url begin fun _sock _conn r w ->
-        run timeout stream extra_headers
-          initialized ws_r client_w handle url r w
+        run timeout stream extra_headers initialized ws_r ws_w url r w
       end
-    end ~finally:(fun () -> Pipe.close_read ws_r ; Deferred.unit) in
+    end ~finally:begin fun () ->
+      Pipe.close_read ws_r ;
+      Pipe.close_read client_r ;
+      Deferred.unit
+    end in
   Deferred.any [ (conn >>= fun c -> return (Error c)) ;
                  Ivar.read initialized >>| fun () -> Ok () ] >>| function
   | Error (Ok _) -> assert false
   | Error (Error e) -> Error e
-  | Ok () -> Ok client_w
+  | Ok () -> Ok (client_r, client_w)
 
-let with_connection ?stream ?crypto ?extra_headers ~handle ~f uri =
-  connect ?stream ?extra_headers ?crypto ~handle uri >>= function
+let with_connection ?stream ?crypto ?extra_headers ~f uri =
+  connect ?stream ?extra_headers ?crypto uri >>= function
   | Error e -> return (Error (`WS e))
-  | Ok w ->
-    try_with (fun () -> f w) >>= function
-    | Error e ->
+  | Ok (r, w) ->
+    Monitor.protect begin fun () ->
+      try_with (fun () -> f r w) >>= function
+      | Error e -> return (Error (`User_callback e))
+      | Ok v -> return (Ok v)
+    end ~finally:begin fun () ->
+      Pipe.close_read r ;
       Pipe.close w ;
-      return (Error (`User_callback e))
-    | Ok v -> return (Ok v)
+      Deferred.unit
+    end
 
 type st = {
   buf : Bigbuffer.t ;
@@ -366,19 +373,20 @@ let connect_ez
   let cleanup () =
     Pipe.close_read ws_read in
   let initialized = Ivar.create () in
-  let handle =
-    let state = ref (create_st ()) in
-    let inner w t =
-      reassemble begin fun st s ->
-        state := st ;
-        match s with
-        | `Fail msg -> failwith msg
-        | `Continue -> Deferred.unit
-        | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
-      end !state t in
-    fun w t -> inner w t in
   let inner () =
-    with_connection ?extra_headers ~crypto uri ~handle ~f:begin fun w ->
+    with_connection ?extra_headers ~crypto uri ~f:begin fun r w ->
+      let handle =
+        let state = ref (create_st ()) in
+        let inner t =
+          reassemble begin fun st s ->
+            state := st ;
+            match s with
+            | `Fail msg -> failwith msg
+            | `Continue -> Deferred.unit
+            | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
+          end !state t in
+        fun t -> inner t in
+      don't_wait_for (Pipe.iter r ~f:handle) ;
       let hb_terminate = Ivar.create () in
       Option.iter hb_ns ~f:begin fun (c, v) ->
         heartbeat c w hb_terminate last_pong cleanup cleaned_up v
