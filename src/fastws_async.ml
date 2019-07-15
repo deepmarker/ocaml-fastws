@@ -25,9 +25,12 @@ type error =
 
 let pp_client_connection_error ppf (e : Client_connection.error) =
   match e with
-  | `Exn e -> Format.fprintf ppf "Exception %a" Exn.pp e
-  | `Invalid_response_body_length resp -> Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
-  | `Malformed_response msg -> Format.fprintf ppf "Malformed response %s" msg
+  | `Exn e ->
+    Format.fprintf ppf "Exception %a" Exn.pp e
+  | `Invalid_response_body_length resp ->
+    Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
+  | `Malformed_response msg ->
+    Format.fprintf ppf "Malformed response %s" msg
 
 let pp_print_error ppf = function
   | HTTP e -> Format.fprintf ppf "HTTP error %a" pp_client_connection_error e
