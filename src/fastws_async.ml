@@ -385,15 +385,15 @@ let connect_ez
             | `Continue -> Deferred.unit
             | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
           end !state t in
-        fun t -> inner t in
-      don't_wait_for (Pipe.iter r ~f:handle) ;
+        inner in
       let hb_terminate = Ivar.create () in
       Option.iter hb_ns ~f:begin fun (c, v) ->
         heartbeat c w hb_terminate last_pong cleanup cleaned_up v
       end ;
-      Ivar.fill initialized () ;
       don't_wait_for (assemble_frames binary ws_read w) ;
+      Ivar.fill initialized () ;
       Deferred.any_unit [
+        Pipe.iter r ~f:handle ;
         Ivar.read hb_terminate ;
         Deferred.all_unit Pipe.[ closed client_read ;
                                  closed client_write ] ] >>= fun () ->
