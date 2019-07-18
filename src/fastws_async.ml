@@ -179,10 +179,9 @@ let run timeout stream extra_headers initialized ws_r ws_w url r w =
           Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
           Pipe.write_if_open ws_w (Header t) >>= fun () ->
           len_to_read := t.length ;
-          if read < len then
-            read_max read
+          if read < len && t.length > 0 then read_max read
           else
-            return (`Consumed (len, `Need_unknown))
+            return (`Consumed (read, `Need_unknown))
     in
     Deferred.any [
       (Pipe.closed ws_w >>| fun () -> `Eof) ;
