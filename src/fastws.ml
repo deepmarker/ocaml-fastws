@@ -91,8 +91,8 @@ module Opcode = struct
     | Nonctrl of int
   [@@deriving sexp]
 
-  let compare = Pervasives.compare
-  let equal = Pervasives.(=)
+  let compare = Stdlib.compare
+  let equal = Stdlib.(=)
 
   let pp ppf t =
     Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t t)
@@ -127,8 +127,8 @@ type t = {
   mask : string option ;
 } [@@deriving sexp]
 
-let compare = Pervasives.compare
-let equal = Pervasives.(=)
+let compare = Stdlib.compare
+let equal = Stdlib.(=)
 
 let pp ppf t =
   Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t t)
