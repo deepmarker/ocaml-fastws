@@ -1,3 +1,4 @@
+open Core
 open Async
 open Alcotest
 open Fastws
@@ -44,13 +45,9 @@ let frame =
     | _ -> false
   end
 
-let filter_map f l =
-  List.fold_right
-    (fun e a -> match f e with None -> a | Some v -> v :: a) l []
-
 let roundtrip ?mask descr frames () =
   let pp = Faraday.create 256 in
-  List.iter begin fun { header ; payload } ->
+  List.iter ~f:begin fun { header ; payload } ->
     Format.eprintf "Free bytes_in_buffer %d@." (Faraday.free_bytes_in_buffer pp);
     serialize pp { header with mask } ;
     match payload with
@@ -77,10 +74,10 @@ let roundtrip ?mask descr frames () =
     end
   in
   let frames' = inner [] 0 in
-  List.iter (fun { header ; _ } ->
+  List.iter ~f:(fun { header ; _ } ->
       Logs.debug (fun m -> m "%a" Fastws.pp header)) frames' ;
   check int "roundtrip list size" (List.length frames) (List.length frames') ;
-  List.iter2 begin fun f f' ->
+  List.iter2_exn ~f:begin fun f f' ->
     check frame descr { f with header = { f.header with mask } } f'
   end frames frames'
 
@@ -125,55 +122,50 @@ let with_connection () =
     ]
   end >>| function
   | Ok () -> ()
-  | Error (`User_callback exn) -> raise exn
-  | Error (`WS e) -> fail (Format.asprintf "%a" pp_print_error e)
+  | Error e -> Error.raise e
 
 let connect_ez () =
-  Fastws_async.connect_ez url >>= function
-  | Error `Internal exn -> raise exn
-  | Error (`WS e) ->
-    fail (Format.asprintf "%a" pp_print_error e)
-  | Ok (r, w, terminated) ->
+  Fastws_async.EZ.connect url >>= function
+  | Error e -> Error.raise e
+  | Ok { r; w; cleaned_up } ->
     let msg = "msg" in
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>= fun res ->
     Pipe.close w ;
     Pipe.close_read r ;
-    terminated >>| fun () ->
+    cleaned_up >>| fun () ->
     match res with
     | `Eof -> failwith "did not receive echo"
     | `Ok msg' -> check string "" msg msg'
 
 let with_connection_ez () =
   let msg = "msg" in
-  Fastws_async.with_connection_ez url ~f:begin fun r w ->
+  Fastws_async.EZ.with_connection url ~f:begin fun r w ->
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>| function
     | `Eof -> failwith "did not receive echo"
     | `Ok msg' -> check string "" msg msg'
   end >>= function
-  | Error `Internal exn -> raise exn
-  | Error (`User_callback exn) -> raise exn
-  | Error (`WS e) -> fail (Format.asprintf "%a" pp_print_error e)
+  | Error e -> Error.raise e
   | Ok () -> Deferred.unit
 
 let roundtrip_unmasked =
   List.map
-    (fun (n, f) -> n, `Quick, roundtrip n f)
-    (List.map (fun (s, f) -> s, [f]) frames)
+    ~f:(fun (n, f) -> n, `Quick, roundtrip n f)
+    (List.map ~f:(fun (s, f) -> s, [f]) frames)
 
 let roundtrip_masked =
-  List.map begin fun (n, f) ->
+  List.map ~f:begin fun (n, f) ->
     n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
   end
-    (List.map (fun (s, f) -> s, [f]) frames)
+    (List.map ~f:(fun (s, f) -> s, [f]) frames)
 
 let roundtrip_unmasked_multi =
   List.map
-    (fun (n, f) -> n, `Quick, roundtrip n f) multiframes
+    ~f:(fun (n, f) -> n, `Quick, roundtrip n f) multiframes
 
 let roundtrip_masked_multi =
-  List.map begin fun (n, f) ->
+  List.map ~f:begin fun (n, f) ->
     n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
   end multiframes
 

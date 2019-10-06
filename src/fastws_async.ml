@@ -18,11 +18,6 @@ type t =
   | Header of Fastws.t
   | Payload of Bigstring.t [@@deriving sexp]
 
-type error =
-  | HTTP of Client_connection.error
-  | Response of Response.t
-  | Timeout of Time_ns.Span.t
-
 let pp_client_connection_error ppf (e : Client_connection.error) =
   match e with
   | `Exn e ->
@@ -31,14 +26,6 @@ let pp_client_connection_error ppf (e : Client_connection.error) =
     Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
   | `Malformed_response msg ->
     Format.fprintf ppf "Malformed response %s" msg
-
-let pp_print_error ppf = function
-  | HTTP e -> Format.fprintf ppf "HTTP error %a" pp_client_connection_error e
-  | Response r -> Format.fprintf ppf "Response error %a" Response.pp_hum r
-  | Timeout t -> Format.fprintf ppf "Timeout after %a" Time_ns.Span.pp t
-
-let raise_error e =
-  failwith (Format.asprintf "%a" pp_print_error e)
 
 let header = function Header _ -> true | _ -> false
 
@@ -66,10 +53,7 @@ let response_handler iv nonce crypto r _body =
     Ivar.fill_if_empty iv (Ok r)
   | _ ->
     Log.err (fun m -> m "Invalid response %a" Response.pp_hum r) ;
-    Ivar.fill_if_empty iv (Error (Response r))
-
-let error_handler signal e =
-  Ivar.fill_if_empty signal (Error (HTTP e))
+    Ivar.fill_if_empty iv (Format.kasprintf Or_error.error_string "%a" Response.pp_hum r)
 
 let write_iovec w iovec =
   List.fold_left iovec ~init:0 ~f:begin fun a { Faraday.buffer ; off ; len } ->
@@ -141,7 +125,8 @@ let run timeout stream extra_headers initialized ws_r ws_w url r w =
   let headers = merge_headers headers (Fastws.headers nonce) in
   let req = Request.create ~headers `GET (Uri.path_and_query url) in
   let ok = Ivar.create () in
-  let error_handler = error_handler ok in
+  let error_handler e =
+    Ivar.fill ok (Format.kasprintf Or_error.error_string "%a" pp_client_connection_error e) in
   let response_handler = response_handler ok nonce (module Crypto) in
   let _body, conn =
     Client_connection.request req ~error_handler ~response_handler in
@@ -150,7 +135,8 @@ let run timeout stream extra_headers initialized ws_r ws_w url r w =
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
   Deferred.any [ Ivar.read ok ;
                  Clock_ns.after timeout >>| fun () ->
-                 Error (Timeout timeout) ] >>= function
+                 Format.kasprintf Or_error.error_string
+                   "Timeout %a" Time_ns.Span.pp timeout ] >>= function
   | Error e -> return (Error e)
   | Ok _ ->
     Ivar.fill initialized () ;
@@ -214,17 +200,15 @@ let connect
   | Ok () -> Ok (client_r, client_w)
 
 let with_connection ?stream ?crypto ?extra_headers ~f uri =
-  connect ?stream ?extra_headers ?crypto uri >>= function
-  | Error e -> return (Error (`WS e))
-  | Ok (r, w) ->
-    Monitor.protect begin fun () ->
-      try_with (fun () -> f r w) >>= function
-      | Error e -> return (Error (`User_callback e))
-      | Ok v -> return (Ok v)
-    end ~finally:begin fun () ->
-      Pipe.close_read r ;
-      Pipe.close w ;
-      Deferred.unit
+  Deferred.Or_error.bind (connect ?stream ?extra_headers ?crypto uri)
+    ~f:begin fun (r, w) ->
+      Monitor.protect begin fun () ->
+        Monitor.try_with_or_error (fun () -> f r w)
+      end ~finally:begin fun () ->
+        Pipe.close_read r ;
+        Pipe.close w ;
+        Deferred.unit
+      end
     end
 
 type st = {
@@ -358,80 +342,109 @@ let assemble_frames binary ws_read w =
     return wq
   end
 
-let connect_ez
-    ?(crypto=(module Crypto : CRYPTO))
-    ?(binary=false)
-    ?extra_headers
-    ?hb_ns
-    uri =
-  let ws_read, client_write = Pipe.create () in
-  let client_read, ws_write = Pipe.create () in
-  let cleaning_up = Ivar.create () in
-  let cleaned_up = Ivar.create () in
-  let last_pong = ref (Time_stamp_counter.now ()) in
-  let cleanup () =
-    Pipe.close_read ws_read in
-  let initialized = Ivar.create () in
-  let inner () =
-    with_connection ?extra_headers ~crypto uri ~f:begin fun r w ->
-      let handle =
-        let state = ref (create_st ()) in
-        let inner t =
-          reassemble begin fun st s ->
-            state := st ;
-            match s with
-            | `Fail msg -> failwith msg
-            | `Continue -> Deferred.unit
-            | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
-          end !state t in
-        inner in
-      let hb_terminate = Ivar.create () in
-      Option.iter hb_ns ~f:begin fun (c, v) ->
-        heartbeat c w hb_terminate last_pong cleanup cleaned_up v
-      end ;
-      don't_wait_for (assemble_frames binary ws_read w) ;
-      Ivar.fill initialized () ;
-      Deferred.any_unit [
-        Pipe.iter r ~f:handle ;
-        Ivar.read hb_terminate ;
-        Deferred.all_unit Pipe.[ closed client_read ;
-                                 closed client_write ] ] >>= fun () ->
-      begin
-        if Pipe.is_closed w then Deferred.unit
-        else write_frame w (close "")
-      end >>| fun () ->
-      Ivar.fill_if_empty cleaning_up ()
-    end in
-  let conn = Monitor.protect inner ~finally:begin fun () ->
-      cleanup () ;
-      Ivar.fill_if_empty cleaned_up () ;
-      Deferred.unit
-    end in
-  Deferred.any [
-    (Ivar.read initialized >>| fun () -> Ok ()) ;
-    conn
-  ] >>| function
-  | Error (`WS e) -> Error (`WS e)
-  | Error (`User_callback e) -> Error (`Internal e)
-  | Ok () -> Ok (client_read, client_write, Ivar.read cleaned_up)
+module EZ = struct
+  module T = struct
+    type t = {
+      r: string Pipe.Reader.t ;
+      w: string Pipe.Writer.t ;
+      cleaned_up: unit Deferred.t ;
+    }
 
-let with_connection_ez
-    ?(crypto=(module Crypto : CRYPTO))
-    ?binary ?extra_headers ?hb_ns uri ~f =
-  connect_ez ?binary ?extra_headers ?hb_ns ~crypto uri >>= function
-  | Error e -> return (Error e)
-  | Ok (r, w, cleaned_up) ->
+    module Address = struct
+      include Uri_sexp
+      let equal = Uri.equal
+    end
+
+    let is_closed { r; _ } = Pipe.is_closed r
+    let close { r; w; cleaned_up } =
+      Pipe.close w ; Pipe.close_read r ; cleaned_up
+    let close_finished { cleaned_up; _ } = cleaned_up
+  end
+  include T
+
+  let connect
+      ?(crypto=(module Crypto : CRYPTO))
+      ?(binary=false)
+      ?extra_headers
+      ?hb_ns
+      uri =
+    let ws_read, client_write = Pipe.create () in
+    let client_read, ws_write = Pipe.create () in
+    let cleaning_up = Ivar.create () in
+    let cleaned_up = Ivar.create () in
+    let last_pong = ref (Time_stamp_counter.now ()) in
+    let cleanup () =
+      Pipe.close_read ws_read in
+    let initialized = Ivar.create () in
+    let inner () =
+      with_connection ?extra_headers ~crypto uri ~f:begin fun r w ->
+        let handle =
+          let state = ref (create_st ()) in
+          let inner t =
+            reassemble begin fun st s ->
+              state := st ;
+              match s with
+              | `Fail msg -> failwith msg
+              | `Continue -> Deferred.unit
+              | `Frame fr -> process cleaning_up cleaned_up last_pong ws_write w fr
+            end !state t in
+          inner in
+        let hb_terminate = Ivar.create () in
+        Option.iter hb_ns ~f:begin fun (c, v) ->
+          heartbeat c w hb_terminate last_pong cleanup cleaned_up v
+        end ;
+        don't_wait_for (assemble_frames binary ws_read w) ;
+        Ivar.fill initialized () ;
+        Deferred.any_unit [
+          Pipe.iter r ~f:handle ;
+          Ivar.read hb_terminate ;
+          Deferred.all_unit Pipe.[ closed client_read ;
+                                   closed client_write ] ] >>= fun () ->
+        begin
+          if Pipe.is_closed w then Deferred.unit
+          else write_frame w (Fastws.close "")
+        end >>| fun () ->
+        Ivar.fill_if_empty cleaning_up ()
+      end in
+    let conn = Monitor.protect inner ~finally:begin fun () ->
+        cleanup () ;
+        Ivar.fill_if_empty cleaned_up () ;
+        Deferred.unit
+      end in
     Deferred.any [
-      (cleaned_up >>| fun () -> Error Exit) ;
-      try_with (fun () -> f r w)
-    ] >>= function
-    | Error e ->
-      Pipe.close_read r ;
-      Pipe.close w ;
-      cleaned_up >>| fun () ->
-      Error (`User_callback e)
-    | Ok v ->
-      Pipe.close_read r ;
-      Pipe.close w ;
-      cleaned_up >>| fun () -> Ok v
+      (Ivar.read initialized >>| fun () -> Ok ()) ;
+      conn
+    ] >>| function
+    | Error e -> Error e
+    | Ok () -> Ok { r = client_read;
+                    w = client_write;
+                    cleaned_up = Ivar.read cleaned_up }
+
+  let with_connection
+      ?(crypto=(module Crypto : CRYPTO))
+      ?binary ?extra_headers ?hb_ns uri ~f =
+    Deferred.Or_error.bind
+      (connect ?binary ?extra_headers ?hb_ns ~crypto uri)
+      ~f:begin fun { r; w; cleaned_up } ->
+        Monitor.protect begin fun () ->
+          Deferred.any [
+            (cleaned_up >>= fun () -> Deferred.Or_error.error_string "exit") ;
+            Monitor.try_with_or_error (fun () -> f r w)
+          ]
+        end
+          ~finally:begin fun () ->
+            Pipe.close_read r ;
+            Pipe.close w ;
+            cleaned_up
+          end
+      end
+
+  module Persistent = struct
+    include Persistent_connection_kernel.Make(T)
+
+    let create' ~server_name ?crypto ?binary ?extra_headers ?hb_ns ?on_event ?retry_delay =
+      let connect url = connect ?crypto ?binary ?extra_headers ?hb_ns url in
+      create ~server_name ?on_event ?retry_delay ~connect
+  end
+end
 

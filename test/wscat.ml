@@ -6,7 +6,7 @@ module Log = (val Logs.src_log src : Logs.LOG)
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 let main url =
-  Fastws_async.with_connection_ez url ~f:begin fun r w ->
+  Fastws_async.EZ.with_connection url ~f:begin fun r w ->
     Deferred.all_unit [
       Pipe.transfer Reader.(pipe @@ Lazy.force stdin) w ~f:begin fun s ->
         String.chop_suffix_exn s ~suffix:"\n"
@@ -27,8 +27,6 @@ let () =
         Logs.set_reporter (Logs_async_reporter.reporter ()) ;
         main url >>= function
         | Ok () -> Deferred.unit
-        | Error (`WS _) -> failwith "WS error"
-        | Error (`Internal exn) -> raise exn
-        | Error (`User_callback exn) -> raise exn
+        | Error e -> Error.raise e
     ] end |>
   Command.run

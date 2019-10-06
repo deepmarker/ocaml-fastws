@@ -20,21 +20,13 @@ val reassemble :
   (st -> [`Continue | `Fail of string | `Frame of frame] -> 'a) ->
   st -> t -> 'a
 
-type error =
-  | HTTP of Client_connection.error
-  | Response of Response.t
-  | Timeout of Time_ns.Span.t
-
-val pp_print_error : Format.formatter -> error -> unit
-val raise_error : error -> 'a
-
 val connect :
   ?timeout:Time_ns.Span.t ->
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
   Uri.t ->
-  (t Pipe.Reader.t * t Pipe.Writer.t, error) result Deferred.t
+  (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.Or_error.t
 (** Closing the resulting writer closes the Websocket connection. *)
 
 val with_connection :
@@ -42,23 +34,44 @@ val with_connection :
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
   f:(t Pipe.Reader.t -> t Pipe.Writer.t -> 'a Deferred.t) ->
-  Uri.t ->
-  ('a, [`User_callback of exn | `WS of error]) result Deferred.t
+  Uri.t -> 'a Deferred.Or_error.t
 
-val connect_ez :
-  ?crypto:(module CRYPTO) ->
-  ?binary:bool ->
-  ?extra_headers:Headers.t ->
-  ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
-  Uri.t ->
-  (string Pipe.Reader.t * string Pipe.Writer.t * unit Deferred.t,
-   [`Internal of exn | `WS of error]) result Deferred.t
+module EZ : sig
+  type t = {
+    r: string Pipe.Reader.t ;
+    w: string Pipe.Writer.t ;
+    cleaned_up: unit Deferred.t ;
+  }
 
-val with_connection_ez :
-  ?crypto:(module CRYPTO) ->
-  ?binary:bool ->
-  ?extra_headers:Headers.t ->
-  ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
-  Uri.t ->
-  f:(string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
-  ('a, [`Internal of exn | `User_callback of exn | `WS of error]) result Deferred.t
+  val connect :
+    ?crypto:(module CRYPTO) ->
+    ?binary:bool ->
+    ?extra_headers:Headers.t ->
+    ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
+    Uri.t -> t Deferred.Or_error.t
+
+  val with_connection :
+    ?crypto:(module CRYPTO) ->
+    ?binary:bool ->
+    ?extra_headers:Headers.t ->
+    ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
+    Uri.t ->
+    f:(string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
+    'a Deferred.Or_error.t
+
+  module Persistent : sig
+    include Persistent_connection_kernel.S
+      with type address = Uri.t
+       and type conn = t
+
+    val create' :
+      server_name:string ->
+      ?crypto:(module CRYPTO) ->
+      ?binary:bool ->
+      ?extra_headers:Headers.t ->
+      ?hb_ns:Time_stamp_counter.Calibrator.t * Int63.t ->
+      ?on_event:(Event.t -> unit Deferred.t) ->
+      ?retry_delay:(unit -> Time_ns.Span.t) ->
+      (unit -> address Or_error.t Deferred.t) -> t
+  end
+end
