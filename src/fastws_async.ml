@@ -94,7 +94,7 @@ let rec flush stream w =
     Faraday.shift stream nb_read ;
     flush stream w
 
-let read_frames stream w ws_r =
+let write_outgoing_frames stream ws_r w =
   let rec inner hdr =
     Pipe.read ws_r >>= function
     | `Eof -> Deferred.unit
@@ -117,6 +117,35 @@ let read_frames stream w ws_r =
   if Writer.is_closed w then Deferred.unit
   else inner None
 
+let read_incoming_frames r ws_w  =
+  let len_to_read = ref 0 in
+  let need = function
+    | 0 -> `Need_unknown
+    | n -> `Need n in
+  let handle_chunk buf ~pos ~len =
+    let read_max already_read =
+      let will_read = min (len - already_read) !len_to_read in
+      len_to_read := !len_to_read - will_read ;
+      let payload = Bigstring.sub_shared buf
+          ~pos:(pos+already_read) ~len:will_read in
+      Pipe.write_if_open ws_w (Payload payload) >>= fun () ->
+      return (`Consumed (already_read + will_read, need !len_to_read)) in
+    if !len_to_read > 0 then read_max 0 else
+      match parse buf ~pos ~len with
+      | `More n -> return (`Consumed (0, `Need (len + n)))
+      | `Ok (t, read) ->
+        Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
+        Pipe.write_if_open ws_w (Header t) >>= fun () ->
+        len_to_read := t.length ;
+        if read < len && t.length > 0 then read_max read
+        else
+          return (`Consumed (read, `Need_unknown))
+  in
+  Deferred.any [
+    (Pipe.closed ws_w >>| fun () -> `Eof) ;
+    Reader.read_one_chunk_at_a_time r ~handle_chunk
+  ]
+
 let run timeout stream extra_headers initialized ws_r ws_w url r w =
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
@@ -133,46 +162,20 @@ let run timeout stream extra_headers initialized ws_r ws_w url r w =
   flush_req conn w ;
   don't_wait_for (read_response conn r) ;
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
-  Deferred.any [ Ivar.read ok ;
-                 Clock_ns.after timeout >>| fun () ->
-                 Format.kasprintf Or_error.error_string
-                   "Timeout %a" Time_ns.Span.pp timeout ] >>= function
-  | Error e -> return (Error e)
-  | Ok _ ->
+  Monitor.try_with_join_or_error begin fun () ->
+    Deferred.any [ Ivar.read ok ;
+                   Clock_ns.after timeout >>| fun () ->
+                   Format.kasprintf Or_error.error_string
+                     "Timeout %a" Time_ns.Span.pp timeout ] end |>
+  Deferred.Or_error.bind ~f:begin fun _ ->
     Ivar.fill initialized () ;
     Log_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
-    don't_wait_for begin
-      try_with (fun () -> read_frames stream w ws_r) >>= function
-      | Ok _ -> Deferred.unit
-      | Error exn -> Log_async.err (fun m -> m "%a" Exn.pp exn)
-    end ;
-    let len_to_read = ref 0 in
-    let need = function
-      | 0 -> `Need_unknown
-      | n -> `Need n in
-    let handle_chunk buf ~pos ~len =
-      let read_max already_read =
-        let will_read = min (len - already_read) !len_to_read in
-        len_to_read := !len_to_read - will_read ;
-        let payload = Bigstring.sub_shared buf
-            ~pos:(pos+already_read) ~len:will_read in
-        Pipe.write_if_open ws_w (Payload payload) >>= fun () ->
-        return (`Consumed (already_read + will_read, need !len_to_read)) in
-      if !len_to_read > 0 then read_max 0 else
-        match parse buf ~pos ~len with
-        | `More n -> return (`Consumed (0, `Need (len + n)))
-        | `Ok (t, read) ->
-          Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
-          Pipe.write_if_open ws_w (Header t) >>= fun () ->
-          len_to_read := t.length ;
-          if read < len && t.length > 0 then read_max read
-          else
-            return (`Consumed (read, `Need_unknown))
-    in
-    Deferred.any [
-      (Pipe.closed ws_w >>| fun () -> `Eof) ;
-      Reader.read_one_chunk_at_a_time r ~handle_chunk
-    ] >>| fun v -> Ok v
+    Monitor.try_with_or_error begin fun () ->
+      Deferred.any_unit [
+        write_outgoing_frames stream ws_r w ;
+        read_incoming_frames r ws_w >>= fun _ -> Deferred.unit ]
+    end
+  end
 
 let connect
     ?(timeout=Time_ns.Span.of_int_sec 10)
@@ -183,7 +186,7 @@ let connect
   let initialized = Ivar.create () in
   let ws_r, client_w = Pipe.create () in
   let client_r, ws_w = Pipe.create () in
-  let conn =
+  let conn () =
     Monitor.protect ~here:[%here] begin fun () ->
       Async_uri.with_connection url begin fun _sock _conn r w ->
         run timeout stream extra_headers initialized ws_r ws_w url r w
@@ -193,11 +196,10 @@ let connect
       Pipe.close_read client_r ;
       Deferred.unit
     end in
-  Deferred.any [ (conn >>= fun c -> return (Error c)) ;
-                 Ivar.read initialized >>| fun () -> Ok () ] >>| function
-  | Error (Ok _) -> assert false
-  | Error (Error e) -> Error e
-  | Ok () -> Ok (client_r, client_w)
+  Deferred.Or_error.map
+    (Deferred.any [ Monitor.try_with_join_or_error conn ;
+                    Ivar.read initialized >>= fun () -> Deferred.Or_error.ok_unit ])
+    ~f:(fun _ -> (client_r, client_w))
 
 let with_connection ?stream ?crypto ?extra_headers ~f uri =
   Deferred.Or_error.bind (connect ?stream ?extra_headers ?crypto uri)
