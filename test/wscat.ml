@@ -21,7 +21,7 @@ let () =
   Command.async ~summary:"WS console" begin
     let open Command.Let_syntax in
     [%map_open
-      let () = Logs_async_reporter.set_level_via_param None
+      let () = Logs_async_reporter.set_level_via_param []
       and url = anon ("url" %: url_cmd) in
       fun () ->
         Logs.set_reporter (Logs_async_reporter.reporter ()) ;
