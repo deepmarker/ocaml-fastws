@@ -166,15 +166,14 @@ let run timeout stream extra_headers initialized ws_r ws_w url r w =
     Deferred.any [ Ivar.read ok ;
                    Clock_ns.after timeout >>| fun () ->
                    Format.kasprintf Or_error.error_string
-                     "Timeout %a" Time_ns.Span.pp timeout ] end |>
-  Deferred.Or_error.bind ~f:begin fun _ ->
-    Ivar.fill initialized () ;
-    Log_async.debug (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
-    Monitor.try_with_or_error begin fun () ->
-      Deferred.any_unit [
-        write_outgoing_frames stream ws_r w ;
-        read_incoming_frames r ws_w >>= fun _ -> Deferred.unit ]
-    end
+                     "Timeout %a" Time_ns.Span.pp timeout ] end >>=? fun _ ->
+  Ivar.fill initialized () ;
+  Log_async.debug
+    (fun m -> m "Connected to %a" Uri.pp_hum url) >>= fun () ->
+  Monitor.try_with_or_error begin fun () ->
+    Deferred.any_unit [
+      write_outgoing_frames stream ws_r w ;
+      read_incoming_frames r ws_w >>= fun _ -> Deferred.unit ]
   end
 
 let connect
@@ -202,16 +201,14 @@ let connect
     ~f:(fun _ -> (client_r, client_w))
 
 let with_connection ?stream ?crypto ?extra_headers ~f uri =
-  Deferred.Or_error.bind (connect ?stream ?extra_headers ?crypto uri)
-    ~f:begin fun (r, w) ->
-      Monitor.protect begin fun () ->
-        Monitor.try_with_or_error (fun () -> f r w)
-      end ~finally:begin fun () ->
-        Pipe.close_read r ;
-        Pipe.close w ;
-        Deferred.unit
-      end
-    end
+  connect ?stream ?extra_headers ?crypto uri >>=? fun (r, w) ->
+  Monitor.protect begin fun () ->
+    Monitor.try_with_or_error (fun () -> f r w)
+  end ~finally:begin fun () ->
+    Pipe.close_read r ;
+    Pipe.close w ;
+    Deferred.unit
+  end
 
 type st = {
   buf : Bigbuffer.t ;
@@ -425,21 +422,17 @@ module EZ = struct
   let with_connection
       ?(crypto=(module Crypto : CRYPTO))
       ?binary ?extra_headers ?hb_ns uri ~f =
-    Deferred.Or_error.bind
-      (connect ?binary ?extra_headers ?hb_ns ~crypto uri)
-      ~f:begin fun { r; w; cleaned_up } ->
-        Monitor.protect begin fun () ->
-          Deferred.any [
-            (cleaned_up >>= fun () -> Deferred.Or_error.error_string "exit") ;
-            Monitor.try_with_or_error (fun () -> f r w)
-          ]
-        end
-          ~finally:begin fun () ->
-            Pipe.close_read r ;
-            Pipe.close w ;
-            cleaned_up
-          end
-      end
+    connect ?binary ?extra_headers ?hb_ns ~crypto uri >>=? fun { r; w; cleaned_up } ->
+    Monitor.protect begin fun () ->
+      Deferred.any [
+        (cleaned_up >>= fun () -> Deferred.Or_error.error_string "exit") ;
+        Monitor.try_with_or_error (fun () -> f r w)
+      ]
+    end ~finally:begin fun () ->
+      Pipe.close_read r ;
+      Pipe.close w ;
+      cleaned_up
+    end
 
   module Persistent = struct
     include Persistent_connection_kernel.Make(T)
