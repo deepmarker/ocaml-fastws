@@ -23,7 +23,7 @@ let uri = Uri.make ~scheme:"https" ~host:"ftx.com" ~path:"ws/" ()
 let rec inner = function
   | 0 -> Deferred.unit
   | n when n > 0 ->
-    Fastws_async.EZ.with_connection uri ~f:begin fun _r _w ->
+    Fastws_async.with_connection uri ~f:begin fun _r _w ->
       Logs_async.app (fun m -> m "inner %d" n)
     end >>= fun _ ->
     Clock_ns.after (Time_ns.Span.of_int_sec 3) >>= fun () ->

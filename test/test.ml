@@ -2,6 +2,7 @@ open Core
 open Async
 open Alcotest
 open Fastws
+open Fastws_async_raw
 open Fastws_async
 
 let () =
@@ -82,7 +83,6 @@ let roundtrip ?mask descr frames () =
   end frames frames'
 
 let connect_f mv w =
-  let open Fastws_async in
   let msg = text "msg" in
   write_frame w msg >>= fun () ->
   Mvar.take mv >>= fun header ->
@@ -96,7 +96,7 @@ let connect_f mv w =
   | _ -> failwith "wrong message sequence"
 
 let handle_incoming_frame mv = function
-  | Fastws_async.Header _ as fr ->
+  | Fastws_async_raw.Header _ as fr ->
     Mvar.put mv fr
   | Payload pld ->
     Mvar.put mv (Payload (Bigstringaf.(copy pld ~off:0 ~len:(length pld))))
@@ -105,7 +105,7 @@ let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 
 let connect () =
   let mv = Mvar.create () in
-  Fastws_async.connect url >>= function
+  Fastws_async_raw.connect url >>= function
   | Error _ -> fail "connect"
   | Ok (r, w) ->
     Deferred.all_unit [
@@ -113,34 +113,23 @@ let connect () =
       Pipe.iter r ~f:(handle_incoming_frame mv) ;
     ]
 
-let with_connection () =
-  let mv = Mvar.create () in
-  Fastws_async.with_connection url ~f:begin fun r w ->
-    Deferred.all_unit [
-      connect_f mv w ;
-      Pipe.iter r ~f:(handle_incoming_frame mv) ;
-    ]
-  end >>| function
-  | Ok () -> ()
-  | Error e -> Error.raise e
-
 let connect_ez () =
-  Fastws_async.EZ.connect url >>= function
+  Fastws_async.connect url >>= function
   | Error e -> Error.raise e
-  | Ok { r; w; cleaned_up } ->
+  | Ok { r; w } ->
     let msg = "msg" in
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>= fun res ->
     Pipe.close w ;
     Pipe.close_read r ;
-    cleaned_up >>| fun () ->
+    Deferred.all_unit [Pipe.closed w; Pipe.closed r] >>| fun () ->
     match res with
     | `Eof -> failwith "did not receive echo"
     | `Ok msg' -> check string "" msg msg'
 
 let with_connection_ez () =
   let msg = "msg" in
-  Fastws_async.EZ.with_connection url ~f:begin fun r w ->
+  Fastws_async.with_connection url ~f:begin fun r w ->
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>| function
     | `Eof -> failwith "did not receive echo"
@@ -171,7 +160,6 @@ let roundtrip_masked_multi =
 
 let async = Alcotest_async.[
     test_case "connect" `Quick connect ;
-    test_case "with_connection" `Quick with_connection ;
     test_case "connect_ez" `Quick connect_ez ;
     test_case "with_connection_ez" `Quick with_connection_ez ;
   ]

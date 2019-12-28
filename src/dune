@@ -16,7 +16,8 @@
  (name fastws_async)
  (public_name fastws-async)
  (preprocess (pps ppx_here ppx_sexp_conv))
- (modules fastws_async)
+ (modules fastws_async_raw fastws_async)
+ (wrapped false)
  (libraries
    uri-sexp
    fastws
