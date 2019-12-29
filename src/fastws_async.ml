@@ -15,9 +15,11 @@ type st = {
   mutable to_read : int ;
   mutable latest_ping : (int * Time_ns.t) option ;
   mutable latest_pong : (int * Time_ns.t) option ;
+  latency_base : float ;
+  latency : int array ;
 }
 
-let create_st binary = {
+let create_st ?(latency_base=1e4) binary = {
   buf = Bigbuffer.create 13 ;
   monitor = Monitor.create () ;
   header = None ;
@@ -25,7 +27,11 @@ let create_st binary = {
   to_read = 0 ;
   latest_ping = None ;
   latest_pong = None ;
+  latency_base ;
+  latency = Array.create ~len:20 0 ;
 }
+
+let histogram { latency_base; latency; _ } = latency_base, latency
 
 let reassemble st t =
   if is_header t then Bigbuffer.clear st.buf ;
@@ -60,20 +66,30 @@ let reassemble st t =
       st.to_read <- st.to_read - buflen ;
       `Continue
 
+let compute_bucket latency_base diff =
+  let open Float in
+  to_int (round_up (log ((Time_ns.Span.to_sec diff *. latency_base) /. log 2.)))
+
 let process st client_w r w ({ header ; payload } as frame) =
   match header.opcode with
   | Ping  -> write_frame w { header = { header with opcode = Pong } ; payload }
   | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
   | Pong ->
     begin match payload with
-      | None -> ()
+      | None -> invalid_arg "received pong with no payload, aborting"
       | Some payload ->
         assert (Bigstring.length payload = header.length) ;
         try
+          let now = Time_ns.now () in
           let cnt = Bigstring.get_int32_le payload ~pos:0 in
-          st.latest_pong <- Some (cnt, Time_ns.now ())
+          st.latest_pong <- Some (cnt, Time_ns.now ()) ;
+          let pingt = snd (Option.value_exn st.latest_ping) in
+          let diff = Time_ns.diff now pingt in
+          let i = compute_bucket st.latency_base diff in
+          if i < Array.length st.latency then
+            st.latency.(i) <- succ st.latency.(i)
         with _ ->
-          Log.err (fun m -> m "Received unidentified pong, aborting") ;
+          Log.err (fun m -> m "received unidentified pong, aborting") ;
           Pipe.close w ;
           Pipe.close_read r
     end ;
@@ -110,7 +126,8 @@ let heartbeat st w span =
       | None, Some _ -> assert false
       | None, _ -> write_ping ()
       | Some (_, ts), None ->
-        if Time_ns.diff now ts < Time_ns.Span.(span + span) then
+        let diff = Time_ns.diff now ts in
+        if diff < Time_ns.Span.(span + span) then
           write_ping ()
         else begin
           Monitor.send_exn st.monitor (Failure "ping timeout") ;
@@ -162,28 +179,29 @@ let mk_client_write st w =
 
 module T = struct
   type t = {
+    st: st ;
     r: string Pipe.Reader.t ;
     w: string Pipe.Writer.t ;
   }
 
-  let create r w = { r; w }
+  let create st r w = { st; r; w }
 
   module Address = Uri_sexp
 
   let is_closed { r; _ } = Pipe.is_closed r
-  let close { r; w } =
+  let close { r; w; _ } =
     Pipe.close w ;
     Pipe.close_read r ;
     Deferred.unit
 
-  let close_finished { r; w } =
+  let close_finished { r; w; _ } =
     Deferred.all_unit [Pipe.closed r ; Pipe.closed w]
 end
 include T
 
-let connect ?crypto ?(binary=false) ?extra_headers ?hb url =
+let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base url =
   connect ?crypto ?extra_headers url >>=? fun (r, w) ->
-  let st = create_st binary in
+  let st = create_st ?latency_base binary in
   Monitor.detach_and_iter_errors st.monitor ~f:begin fun exn ->
     Log.err (fun m -> m "%a" Exn.pp exn) ;
     Pipe.close_read r ;
@@ -196,14 +214,13 @@ let connect ?crypto ?(binary=false) ?extra_headers ?hb url =
   let client_write = mk_client_write st w in
   (Pipe.closed client_read  >>> fun () -> Pipe.close_read r) ;
   (Pipe.closed client_write >>> fun () -> Pipe.close w) ;
-  Deferred.Or_error.return (create client_read client_write)
+  Deferred.Or_error.return (create st client_read client_write)
 
 let with_connection
-    ?(crypto=(module Crypto : CRYPTO))
-    ?binary ?extra_headers ?hb uri ~f =
-  connect ?binary ?extra_headers ?hb ~crypto uri >>=? fun { r; w } ->
+    ?crypto ?binary ?extra_headers ?hb ?latency_base uri ~f =
+  connect ?binary ?extra_headers ?hb ?latency_base ?crypto uri >>=? fun { st; r; w } ->
   Monitor.protect begin fun () ->
-    Monitor.try_with_or_error (fun () -> f r w)
+    Monitor.try_with_or_error (fun () -> f st r w)
   end ~finally:begin fun () ->
     Pipe.close_read r ;
     Pipe.close w ;

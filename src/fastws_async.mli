@@ -4,15 +4,23 @@ open Fastws
 open Httpaf
 
 type t = {
+  st: st ;
   r: string Pipe.Reader.t ;
   w: string Pipe.Writer.t ;
-}
+} and st
+
+val histogram : st -> float * int array
+(** [histogram st = (base, histogram)]. [base] is the value which
+    multiplies the latency in seconds (by default 1e4, 100us), and
+    [histogram] is the number of observations where pongs where between
+    base*2^(i-1) and base*2^i *)
 
 val connect :
   ?crypto:(module CRYPTO) ->
   ?binary:bool ->
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
+  ?latency_base:float ->
   Uri.t -> t Deferred.Or_error.t
 
 val with_connection :
@@ -20,8 +28,9 @@ val with_connection :
   ?binary:bool ->
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
+  ?latency_base:float ->
   Uri.t ->
-  f:(string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
+  f:(st -> string Pipe.Reader.t -> string Pipe.Writer.t -> 'a Deferred.t) ->
   'a Deferred.Or_error.t
 
 module Persistent : sig
