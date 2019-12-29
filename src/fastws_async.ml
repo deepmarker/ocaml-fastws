@@ -70,7 +70,7 @@ let compute_bucket latency_base diff =
   let open Float in
   to_int (round_up (log ((Time_ns.Span.to_sec diff *. latency_base) /. log 2.)))
 
-let process st client_w r w ({ header ; payload } as frame) =
+let process rd st client_w r w ({ header ; payload } as frame) =
   match header.opcode with
   | Ping  -> write_frame w { header = { header with opcode = Pong } ; payload }
   | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
@@ -101,7 +101,7 @@ let process st client_w r w ({ header ; payload } as frame) =
         assert (Bigstring.length payload = header.length) ;
         let payload = Bigstring.to_string payload in
         Log_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
-        Pipe.write client_w payload
+        Pipe.write client_w (rd payload)
     end
   | Continuation -> assert false
   | Ctrl _ | Nonctrl _ ->
@@ -150,7 +150,7 @@ let heartbeat st w span =
   in
   Clock_ns.run_at_intervals' ~continue_on_error:false ~stop span send_ping
 
-let mk_client_read st ws_write r =
+let mk_client_read rd st ws_write r =
   Pipe.create_reader ~close_on_exception:false begin fun client_w ->
     Pipe.iter r ~f:begin fun t ->
       match reassemble st t with
@@ -158,16 +158,16 @@ let mk_client_read st ws_write r =
       | `Continue -> Deferred.unit
       | `Frame fr ->
         Scheduler.within' ~monitor:st.monitor
-          (fun () -> process st client_w r ws_write fr)
+          (fun () -> process rd st client_w r ws_write fr)
     end
   end
 
-let mk_client_write st w =
+let mk_client_write wr st w =
   Pipe.create_writer begin fun ws_read ->
     Pipe.iter ws_read ~f:begin fun m ->
       let { header ; payload } = match st.binary with
-        | true -> Fastws.binary m
-        | false -> Fastws.text m in
+        | true -> Fastws.binary (wr m)
+        | false -> Fastws.text (wr m) in
       Scheduler.within' ~monitor:st.monitor begin fun () ->
         Pipe.write w (Header header) >>= fun () ->
         match payload with
@@ -177,29 +177,15 @@ let mk_client_write st w =
     end
   end
 
-module T = struct
-  type t = {
-    st: st ;
-    r: string Pipe.Reader.t ;
-    w: string Pipe.Writer.t ;
-  }
+type ('r, 'w) t = {
+  st: st ;
+  r: 'r Pipe.Reader.t ;
+  w: 'w Pipe.Writer.t ;
+}
 
-  let create st r w = { st; r; w }
+let create st r w = { st; r; w }
 
-  module Address = Uri_sexp
-
-  let is_closed { r; _ } = Pipe.is_closed r
-  let close { r; w; _ } =
-    Pipe.close w ;
-    Pipe.close_read r ;
-    Deferred.unit
-
-  let close_finished { r; w; _ } =
-    Deferred.all_unit [Pipe.closed r ; Pipe.closed w]
-end
-include T
-
-let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base url =
+let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base ~rd ~wr url =
   connect ?crypto ?extra_headers url >>=? fun (r, w) ->
   let st = create_st ?latency_base binary in
   Monitor.detach_and_iter_errors st.monitor ~f:begin fun exn ->
@@ -210,15 +196,15 @@ let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base url =
   Option.iter hb ~f:begin fun span ->
     Scheduler.within ~monitor:st.monitor (fun () -> heartbeat st w span)
   end;
-  let client_read  = mk_client_read st w r in
-  let client_write = mk_client_write st w in
+  let client_read  = mk_client_read rd st w r in
+  let client_write = mk_client_write wr st w in
   (Pipe.closed client_read  >>> fun () -> Pipe.close_read r) ;
   (Pipe.closed client_write >>> fun () -> Pipe.close w) ;
   Deferred.Or_error.return (create st client_read client_write)
 
 let with_connection
-    ?crypto ?binary ?extra_headers ?hb ?latency_base uri ~f =
-  connect ?binary ?extra_headers ?hb ?latency_base ?crypto uri >>=? fun { st; r; w } ->
+    ?crypto ?binary ?extra_headers ?hb ?latency_base ~rd ~wr uri ~f =
+  connect ?binary ?extra_headers ?hb ?latency_base ?crypto ~rd ~wr uri >>=? fun { st; r; w } ->
   Monitor.protect begin fun () ->
     Monitor.try_with_or_error (fun () -> f st r w)
   end ~finally:begin fun () ->
@@ -227,10 +213,24 @@ let with_connection
     Deferred.unit
   end
 
-module Persistent = struct
-  include Persistent_connection_kernel.Make(T)
+module type RW = sig
+  type r
+  type w
+end
 
-  let create' ~server_name ?crypto ?binary ?extra_headers ?hb ?on_event ?retry_delay =
-    let connect url = connect ?crypto ?binary ?extra_headers ?hb url in
-    create ~server_name ?on_event ?retry_delay ~connect
+module MakePersistent(A: RW) = struct
+  type nonrec t = (A.r, A.w) t
+
+  module Address = Uri_sexp
+
+  let is_closed { r; w; _ } =
+    Pipe.(is_closed r && is_closed w)
+
+  let close { r; w; _ } =
+    Pipe.close w ;
+    Pipe.close_read r ;
+    Deferred.unit
+
+  let close_finished { r; w; _ } =
+    Deferred.all_unit [Pipe.closed r; Pipe.closed w]
 end

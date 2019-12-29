@@ -114,7 +114,7 @@ let connect () =
     ]
 
 let connect_ez () =
-  Fastws_async.connect url >>= function
+  Fastws_async.connect ~rd:Fn.id ~wr:Fn.id url >>= function
   | Error e -> Error.raise e
   | Ok { r; w; _ } ->
     let msg = "msg" in
@@ -129,7 +129,7 @@ let connect_ez () =
 
 let with_connection_ez () =
   let msg = "msg" in
-  Fastws_async.with_connection url ~f:begin fun _ r w ->
+  Fastws_async.with_connection ~rd:Fn.id ~wr:Fn.id url ~f:begin fun _ r w ->
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>| function
     | `Eof -> failwith "did not receive echo"
