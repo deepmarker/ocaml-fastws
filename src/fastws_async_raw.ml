@@ -188,8 +188,9 @@ let connect
     ?interrupt ?reader_buffer_size ?writer_buffer_size ?timeout
     url >>= fun (_sock, _conn, r, w) ->
   initialize ?timeout ?extra_headers url r w >>|? fun _resp ->
-  let client_read = mk_client_read r in
+  let client_read  = mk_client_read r in
   let client_write = mk_client_write ?stream w in
-  don't_wait_for (Pipe.closed client_read  >>= fun () -> Reader.close r) ;
-  don't_wait_for (Pipe.closed client_write >>= fun () -> Writer.close w) ;
+  don't_wait_for (Deferred.all_unit Pipe.[closed client_read; closed client_write] >>= fun () ->
+                  Writer.close w >>= fun () ->
+                  Reader.close r) ;
   client_read, client_write
