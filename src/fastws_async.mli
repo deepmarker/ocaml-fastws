@@ -21,9 +21,9 @@ val connect :
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
   ?latency_base:float ->
-  rd:(string -> 'r) ->
-  wr:('w -> string) ->
-  Uri.t -> ('r, 'w) t Deferred.Or_error.t
+  of_string:(string -> 'r) ->
+  to_string:('w -> string) ->
+  Uri.t -> ('r, 'w) t Deferred.t
 
 val with_connection :
   ?crypto:(module CRYPTO) ->
@@ -31,11 +31,11 @@ val with_connection :
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
   ?latency_base:float ->
-  rd:(string -> 'r) ->
-  wr:('w -> string) ->
+  of_string:(string -> 'r) ->
+  to_string:('w -> string) ->
   Uri.t ->
-  f:(st -> 'r Pipe.Reader.t -> 'w Pipe.Writer.t -> 'a Deferred.t) ->
-  'a Deferred.Or_error.t
+  (st -> 'r Pipe.Reader.t -> 'w Pipe.Writer.t -> 'a Deferred.t) ->
+  'a Deferred.t
 
 module type RW = sig
   type r

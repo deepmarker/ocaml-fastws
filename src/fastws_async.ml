@@ -185,8 +185,8 @@ type ('r, 'w) t = {
 
 let create st r w = { st; r; w }
 
-let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base ~rd ~wr url =
-  connect ?crypto ?extra_headers url >>=? fun (r, w) ->
+let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base ~of_string ~to_string url =
+  connect ?crypto ?extra_headers url >>= fun (r, w) ->
   let st = create_st ?latency_base binary in
   Monitor.detach_and_iter_errors st.monitor ~f:begin fun exn ->
     Log.err (fun m -> m "%a" Exn.pp exn) ;
@@ -196,18 +196,16 @@ let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base ~rd ~wr url
   Option.iter hb ~f:begin fun span ->
     Scheduler.within ~monitor:st.monitor (fun () -> heartbeat st w span)
   end;
-  let client_read  = mk_client_read rd st w r in
-  let client_write = mk_client_write wr st w in
+  let client_read  = mk_client_read of_string st w r in
+  let client_write = mk_client_write to_string st w in
   (Pipe.closed client_read  >>> fun () -> Pipe.close_read r) ;
   (Pipe.closed client_write >>> fun () -> Pipe.close w) ;
-  Deferred.Or_error.return (create st client_read client_write)
+  return (create st client_read client_write)
 
 let with_connection
-    ?crypto ?binary ?extra_headers ?hb ?latency_base ~rd ~wr uri ~f =
-  connect ?binary ?extra_headers ?hb ?latency_base ?crypto ~rd ~wr uri >>=? fun { st; r; w } ->
-  Monitor.protect begin fun () ->
-    Monitor.try_with_or_error (fun () -> f st r w)
-  end ~finally:begin fun () ->
+    ?crypto ?binary ?extra_headers ?hb ?latency_base ~of_string ~to_string uri f =
+  connect ?binary ?extra_headers ?hb ?latency_base ?crypto ~of_string ~to_string uri >>= fun { st; r; w } ->
+  Monitor.protect (fun () -> f st r w) ~finally:begin fun () ->
     Pipe.close_read r ;
     Pipe.close w ;
     Deferred.unit

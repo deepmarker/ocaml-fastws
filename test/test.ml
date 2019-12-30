@@ -105,18 +105,14 @@ let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 
 let connect () =
   let mv = Mvar.create () in
-  Fastws_async_raw.connect url >>= function
-  | Error _ -> fail "connect"
-  | Ok (r, w) ->
+  Fastws_async_raw.connect url >>= fun (r, w) ->
     Deferred.all_unit [
       connect_f mv w ;
       Pipe.iter r ~f:(handle_incoming_frame mv) ;
     ]
 
 let connect_ez () =
-  Fastws_async.connect ~rd:Fn.id ~wr:Fn.id url >>= function
-  | Error e -> Error.raise e
-  | Ok { r; w; _ } ->
+  Fastws_async.connect ~of_string:Fn.id ~to_string:Fn.id url >>= fun { r; w; _ } ->
     let msg = "msg" in
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>= fun res ->
@@ -129,14 +125,12 @@ let connect_ez () =
 
 let with_connection_ez () =
   let msg = "msg" in
-  Fastws_async.with_connection ~rd:Fn.id ~wr:Fn.id url ~f:begin fun _ r w ->
+  Fastws_async.with_connection ~of_string:Fn.id ~to_string:Fn.id url begin fun _ r w ->
     Pipe.write w msg >>= fun () ->
     Pipe.read r >>| function
     | `Eof -> failwith "did not receive echo"
     | `Ok msg' -> check string "" msg msg'
-  end >>= function
-  | Error e -> Error.raise e
-  | Ok () -> Deferred.unit
+  end
 
 let roundtrip_unmasked =
   List.map

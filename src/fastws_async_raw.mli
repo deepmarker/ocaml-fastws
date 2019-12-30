@@ -27,4 +27,4 @@ val connect:
   ?stream:Faraday.t ->
   ?crypto:(module CRYPTO) ->
   ?extra_headers:Httpaf.Headers.t ->
-  Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t, Error.t) result Deferred.t
+  Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
