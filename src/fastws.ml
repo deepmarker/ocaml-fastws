@@ -206,6 +206,51 @@ let xormask ~mask buf =
 type parse_result =
   [`More of int | `Ok of t * int]
 
+let parse_aux buf pos len =
+  let b1 = Bigstringaf.get buf pos in
+  let b2 = Bigstringaf.get buf (pos+1) in
+  let final = get_finmask b1 in
+  let rsv = get_rsv b1 in
+  let opcode = get_opcode b1 in
+  let masked = get_finmask b2 in
+  let frame_len = get_len b2 in
+  match frame_len, masked with
+  | 126, false ->
+    let reql = 2 + 2 in
+    if len < reql then `More (reql - len)
+    else
+      let length = Bigstringaf.get_int16_be buf (pos+2) in
+      `Ok (create ~final ~rsv ~length opcode, reql)
+  | 126, true ->
+    let reql = 2 + 2 + 4 in
+    if len < reql then `More (reql - len)
+    else
+      let length = Bigstringaf.get_int16_be buf (pos+2) in
+      let mask = Bigstringaf.substring buf ~off:(pos+4) ~len:4 in
+      `Ok ((create ~final ~rsv ~length ~mask opcode), reql)
+  | 127, false ->
+    let reql = 2 + 8 in
+    if len < reql then `More (reql - len)
+    else
+      let length = Bigstringaf.get_int64_be buf (pos+2) in
+      let length = Int64.to_int length in
+      `Ok ((create ~final ~rsv ~length opcode), reql)
+  | 127, true ->
+    let reql = 2 + 8 + 4 in
+    if len < reql then `More (reql - len)
+    else
+      let length = Bigstringaf.get_int64_be buf (pos+2) in
+      let length = Int64.to_int length in
+      let mask = Bigstringaf.substring buf ~off:(pos+10) ~len:4 in
+      `Ok (create ~final ~rsv ~length ~mask opcode, reql)
+  | length, true ->
+    let reql = 2 + 4 in
+    if len < reql then `More (reql - len)
+    else
+      let mask = Bigstringaf.substring buf ~off:(pos+2) ~len:4 in
+      `Ok (create ~final ~rsv ~mask ~length opcode, reql)
+  | length, false -> `Ok (create ~final ~rsv ~length opcode, 2)
+
 let parse ?(pos=0) ?len buf =
   let len = match len with
     | Some len -> len
@@ -213,50 +258,7 @@ let parse ?(pos=0) ?len buf =
   if pos < 0 || len < 0 || pos + len > Bigstringaf.length buf then
     invalid_arg (Printf.sprintf "parse: pos = %d, len = %d" pos len) ;
   if len < 2 then `More (2 - len)
-  else
-    let b1 = Bigstringaf.get buf pos in
-    let b2 = Bigstringaf.get buf (pos+1) in
-    let final = get_finmask b1 in
-    let rsv = get_rsv b1 in
-    let opcode = get_opcode b1 in
-    let masked = get_finmask b2 in
-    let frame_len = get_len b2 in
-    match frame_len, masked with
-    | 126, false ->
-      let reql = 2 + 2 in
-      if len < reql then `More (reql - len)
-      else
-        let length = Bigstringaf.get_int16_be buf (pos+2) in
-        `Ok (create ~final ~rsv ~length opcode, reql)
-    | 126, true ->
-      let reql = 2 + 2 + 4 in
-      if len < reql then `More (reql - len)
-      else
-        let length = Bigstringaf.get_int16_be buf (pos+2) in
-        let mask = Bigstringaf.substring buf ~off:(pos+4) ~len:4 in
-        `Ok ((create ~final ~rsv ~length ~mask opcode), reql)
-    | 127, false ->
-      let reql = 2 + 8 in
-      if len < reql then `More (reql - len)
-      else
-        let length = Bigstringaf.get_int64_be buf (pos+2) in
-        let length = Int64.to_int length in
-        `Ok ((create ~final ~rsv ~length opcode), reql)
-    | 127, true ->
-      let reql = 2 + 8 + 4 in
-      if len < reql then `More (reql - len)
-      else
-        let length = Bigstringaf.get_int64_be buf (pos+2) in
-        let length = Int64.to_int length in
-        let mask = Bigstringaf.substring buf ~off:(pos+10) ~len:4 in
-        `Ok (create ~final ~rsv ~length ~mask opcode, reql)
-    | length, true ->
-      let reql = 2 + 4 in
-      if len < reql then `More (reql - len)
-      else
-        let mask = Bigstringaf.substring buf ~off:(pos+2) ~len:4 in
-        `Ok (create ~final ~rsv ~mask ~length opcode, reql)
-    | length, false -> `Ok (create ~final ~rsv ~length opcode, 2)
+  else parse_aux buf pos len
 
 let serialize t { opcode ; rsv ; final ; length ; mask } =
   let open Faraday in
