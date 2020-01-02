@@ -5,7 +5,6 @@
 
 open Core
 open Async
-open Fastws
 
 type t =
   | Header of Fastws.t
@@ -13,7 +12,7 @@ type t =
 [@@deriving sexp_of]
 
 val is_header : t -> bool
-val write_frame : t Pipe.Writer.t -> frame -> unit Deferred.t
+val write_frame : t Pipe.Writer.t -> Fastws.frame -> unit Deferred.t
 
 val connect:
   ?version:Async_ssl.Version.t ->
@@ -25,6 +24,6 @@ val connect:
   ?writer_buffer_size:int ->
   ?timeout:Time.Span.t ->
   ?stream:Faraday.t ->
-  ?crypto:(module CRYPTO) ->
+  ?crypto:(module Fastws.CRYPTO) ->
   ?extra_headers:Httpaf.Headers.t ->
   Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
