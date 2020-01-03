@@ -9,11 +9,17 @@ type ('r, 'w) t = {
   w: 'w Pipe.Writer.t ;
 } and st
 
-val histogram : st -> float * int array
-(** [histogram st = (base, histogram)]. [base] is the value which
-    multiplies the latency in seconds (by default 1e4, 100us), and
-    [histogram] is the number of observations where pongs where between
-    base*2^(i-1) and base*2^i *)
+module Histogram : sig
+  type t = private {
+    base: float ; (** Multiply the array indices by base*2^i. *)
+    mutable sum: Time_ns.Span.t ; (** Sum of latencies (useful for prometheus). *)
+    values: int array ; (** Occurences which fall in the corresponding bucket. *)
+  }
+  val create : ?base:float -> int -> t
+  val add : t -> Time_ns.Span.t -> unit
+end
+
+val histogram : st -> Histogram.t
 
 val connect :
   ?crypto:(module CRYPTO) ->
