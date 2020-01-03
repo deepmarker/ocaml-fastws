@@ -120,30 +120,31 @@ let mk_client_write w =
     else inner r None
   end
 
-let need = function
-  | 0 -> `Need_unknown
-  | n -> `Need n
-
-let handle_chunk w =
-  let len_to_read = ref 0 in
-  fun buf ~pos ~len ->
-    let read_max already_read =
-      let will_read = min (len - already_read) !len_to_read in
-      len_to_read := !len_to_read - will_read ;
-      let payload = Bigstring.sub_shared buf
-          ~pos:(pos+already_read) ~len:will_read in
+let handle_chunk w buf ~pos ~len =
+  Log_async.debug (fun m -> m "handle_chunk %d %d" pos len) >>= fun () ->
+  let rec read_payload hdr consumed read len_to_read =
+    let will_read = min (len - consumed) len_to_read in
+    let will_not_read = len_to_read - will_read in
+    if will_not_read > 0 then
+      return (`Consumed (Int.max 0 (consumed - read), `Need (read+len_to_read)))
+    else
+      let payload = Bigstring.sub buf ~pos:(pos+consumed+read) ~len:will_read in
+      Pipe.write_if_open w (Header hdr) >>= fun () ->
       Pipe.write_if_open w (Payload payload) >>= fun () ->
-      return (`Consumed (already_read + will_read, need !len_to_read)) in
-    if !len_to_read > 0 then read_max 0 else
-      match parse buf ~pos ~len with
-      | `More n -> return (`Consumed (0, `Need (len + n)))
+      Log.debug (fun m -> m "Consumed total %d" (consumed+read+will_read)) ;
+      read_header (consumed+read+will_read)
+  and read_header consumed =
+    if consumed = len then return `Continue
+    else match parse buf ~pos:(pos+consumed) ~len:(len-consumed) with
+      | `More n -> return (`Consumed (consumed, `Need n))
       | `Ok (t, read) ->
         Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
-        Pipe.write_if_open w (Header t) >>= fun () ->
-        len_to_read := t.length ;
-        if read < len && t.length > 0 then read_max read
+        if t.length > 0 then
+          read_payload t consumed read t.length
         else
-          return (`Consumed (read, `Need_unknown))
+          Pipe.write_if_open w (Header t) >>= fun () ->
+          read_header (consumed+read) in
+  read_header 0
 
 let mk_client_read r =
   Pipe.create_reader ~close_on_exception:false begin fun w ->
