@@ -56,20 +56,20 @@ let response_handler iv nonce crypto r _body =
     Log.err (fun m -> m "Invalid response %a" Response.pp_hum r) ;
     Ivar.fill_if_empty iv (Format.kasprintf Or_error.error_string "%a" Response.pp_hum r)
 
-let write_iovec w iovec =
-  List.fold_left iovec ~init:0 ~f:begin fun a { Faraday.buffer ; off ; len } ->
-    Writer.write_bigstring w buffer ~pos:off ~len ;
-    a+len
-  end
+let write_iovecs w iovecs =
+  let nbWritten =
+    List.fold_left iovecs ~init:0 ~f:begin fun a ({ IOVec.len; _ } as iovec) ->
+      Writer.schedule_iovec w (Obj.magic iovec) ;
+      a+len
+    end in
+  `Ok nbWritten
 
 let rec flush_req conn w =
   match Client_connection.next_write_operation conn with
-  | `Write iovec ->
-    let nb_read = write_iovec w iovec in
-    Client_connection.report_write_result conn (`Ok nb_read) ;
+  | `Write iovecs ->
+    Client_connection.report_write_result conn (write_iovecs w iovecs) ;
     flush_req conn w
-  | `Yield ->
-    Client_connection.yield_writer conn (fun () -> flush_req conn w) ;
+  | `Yield -> Client_connection.yield_writer conn (fun () -> flush_req conn w)
   | `Close _ -> ()
 
 let rec read_response conn r =
@@ -86,33 +86,33 @@ let rec read_response conn r =
       | `Stopped () -> read_response conn r
     end
 
-let rec flush stream w =
-  match Faraday.operation stream with
-  | `Close -> raise Exit
-  | `Yield -> Deferred.unit
-  | `Writev iovec ->
-    let nb_read = write_iovec w iovec in
-    Faraday.shift stream nb_read ;
-    flush stream w
+let flush stream w =
+  Faraday_async.serialize stream
+    ~yield:(fun _ -> Scheduler.yield ())
+    ~writev:(fun iovecs -> return (write_iovecs w iovecs))
 
-let mk_client_write ?(stream=Faraday.create 4096) w =
+let mk_client_write w =
   let rec inner r hdr =
     Pipe.read r >>= function
     | `Eof -> Deferred.unit
     | `Ok (Header t) ->
+      let serializer = Faraday.create 6 in
       let mask = Crypto.(to_string (generate 4)) in
       let h = { t with mask = Some mask } in
-      serialize stream h ;
-      flush stream w >>= fun () ->
+      serialize serializer h ;
+      Faraday.close serializer ;
+      flush serializer w >>= fun () ->
       Log_async.debug (fun m -> m "-> %a" pp t) >>= fun () ->
       inner r (Some h)
     | `Ok (Payload buf) ->
       match hdr with
       | Some { mask = Some mask ; _ } ->
+        let serializer = Faraday.create (Bigstring.length buf + 6) in
         xormask ~mask buf ;
-        Faraday.write_bigstring stream buf ;
+        Faraday.write_bigstring serializer buf ;
+        Faraday.close serializer ;
         xormask ~mask buf ;
-        flush stream w >>= fun () ->
+        flush serializer w >>= fun () ->
         inner r hdr
       | _ -> failwith "current header must exist" in
   Pipe.create_writer begin fun r ->
@@ -181,7 +181,6 @@ let connect
     ?version ?options ?socket ?buffer_age_limit
     ?interrupt ?reader_buffer_size ?writer_buffer_size
     ?timeout
-    ?stream
     ?(crypto = (module Crypto : CRYPTO))
     ?extra_headers url =
   let module Crypto = (val crypto : CRYPTO) in
@@ -191,7 +190,7 @@ let connect
     url >>= fun (_sock, _conn, r, w) ->
   initialize ?timeout ?extra_headers url r w >>| fun _resp ->
   let client_read  = mk_client_read r in
-  let client_write = mk_client_write ?stream w in
+  let client_write = mk_client_write w in
   don't_wait_for (Deferred.all_unit Pipe.[closed client_read; closed client_write] >>= fun () ->
                   Writer.close w >>= fun () ->
                   Reader.close r) ;

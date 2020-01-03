@@ -23,7 +23,6 @@ val connect:
   ?reader_buffer_size:int ->
   ?writer_buffer_size:int ->
   ?timeout:Time.Span.t ->
-  ?stream:Faraday.t ->
   ?crypto:(module Fastws.CRYPTO) ->
   ?extra_headers:Httpaf.Headers.t ->
   Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
