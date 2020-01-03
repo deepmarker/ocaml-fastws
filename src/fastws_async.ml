@@ -36,9 +36,10 @@ let histogram { latency_base; latency; _ } = latency_base, latency
 let reassemble st t =
   if is_header t then Bigbuffer.clear st.buf ;
   match t, st.header with
-  | Header { opcode; final; _ }, Some { final = false ; _ } when
-      final && opcode <> Continuation ->
-    `Fail "unfinished continuation"
+  | Header ({ opcode = Text; final = true; _ } as h) , Some ({ final = false ; _ } as h')
+  | Header ({ opcode = Binary; final = true; _ } as h), Some ({ final = false ; _ } as h')
+  | Header ({ opcode = Nonctrl _; final = true; _ } as h), Some ({ final = false ; _ } as h') ->
+    Format.kasprintf (fun msg -> `Fail msg) "unfinished continuation: %a@.%a" Fastws.pp h Fastws.pp h'
   | Header { opcode = Continuation ; length ; _ }, _ ->
     st.to_read <- length ;
     `Continue
