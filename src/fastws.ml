@@ -146,10 +146,14 @@ type frame = {
 let pp_frame ppf = function
   | { header ; payload = None } ->
     Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t header)
-  | { header ; payload = Some payload } ->
+  | { header = { opcode = Text; _ } as header ; payload = Some payload } ->
+    Format.fprintf ppf "%a [%s]"
+      Sexplib.Sexp.pp (sexp_of_t header)
+      Bigstringaf.(substring payload ~off:0 ~len:(min 1024 (length payload)))
+  | { header; payload = Some payload } ->
     Format.fprintf ppf "%a [%S]"
       Sexplib.Sexp.pp (sexp_of_t header)
-      Bigstringaf.(substring payload ~off:0 ~len:(length payload))
+      Bigstringaf.(substring payload ~off:0 ~len:(min 1024 (length payload)))
 
 let kcreate opcode content =
   match String.length content with
