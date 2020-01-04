@@ -87,6 +87,7 @@ let reassemble st t =
       `Continue
 
 let process rd st client_w r w ({ header ; payload } as frame) =
+  Log_async.debug (fun m -> m "<- %a" pp_frame frame) >>= fun () ->
   match header.opcode with
   | Ping  -> write_frame w { header = { header with opcode = Pong } ; payload }
   | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
@@ -112,7 +113,6 @@ let process rd st client_w r w ({ header ; payload } as frame) =
       | Some payload ->
         assert (Bigstring.length payload = header.length) ;
         let payload = Bigstring.to_string payload in
-        Log_async.debug (fun m -> m "<- %s" payload) >>= fun () ->
         Pipe.write client_w (rd payload)
     end
   | Continuation -> assert false
