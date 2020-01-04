@@ -120,31 +120,60 @@ let mk_client_write w =
     else inner r None
   end
 
-let handle_chunk w buf ~pos ~len =
-  Log_async.debug (fun m -> m "handle_chunk %d %d" pos len) >>= fun () ->
-  let rec read_payload hdr consumed read len_to_read =
-    let will_read = min (len - consumed) len_to_read in
-    let will_not_read = len_to_read - will_read in
-    if will_not_read > 0 then
-      return (`Consumed (Int.max 0 (consumed - read), `Need (read+len_to_read)))
-    else
-      let payload = Bigstring.sub buf ~pos:(pos+consumed+read) ~len:will_read in
-      Pipe.write_if_open w (Header hdr) >>= fun () ->
-      Pipe.write_if_open w (Payload payload) >>= fun () ->
-      Log.debug (fun m -> m "Consumed total %d" (consumed+read+will_read)) ;
-      read_header (consumed+read+will_read)
-  and read_header consumed =
-    if consumed = len then return `Continue
-    else match parse buf ~pos:(pos+consumed) ~len:(len-consumed) with
-      | `More n -> return (`Consumed (consumed, `Need n))
-      | `Ok (t, read) ->
-        Log_async.debug (fun m -> m "<- %a" pp t) >>= fun () ->
-        if t.length > 0 then
-          read_payload t consumed read t.length
-        else
-          Pipe.write_if_open w (Header t) >>= fun () ->
-          read_header (consumed+read) in
-  read_header 0
+type st = {
+  h: Fastws.t ;
+  payload: Bigstring.t ;
+  mutable pos: int ;
+}
+
+let create_st h =
+  let payload = Bigstring.create h.length in
+  { h ; payload ; pos = 0 }
+
+let write_st w { h; payload; _ } =
+  Pipe.write w (Header h) >>= fun () ->
+  Pipe.write w (Payload payload)
+
+let handle_chunk w =
+  let current_header = ref None in
+  let consumed = ref 0 in
+  let rec read_payload buf ~pos ~len =
+    assert (Option.is_some !current_header) ;
+    let st = Option.value_exn !current_header in
+    let wanted_len = Bigstring.length st.payload - st.pos in
+    let will_read = min (len - !consumed) wanted_len in
+    Bigstring.blit ~src:buf ~src_pos:(pos + !consumed) ~dst:st.payload ~dst_pos:st.pos ~len:will_read ;
+    st.pos <- st.pos + will_read ;
+    consumed := !consumed + will_read ;
+    Log_async.info (fun m -> m "Consumed total %d/%d" !consumed len) >>= fun () ->
+    let missing_len = wanted_len - will_read in
+    if missing_len > 0 then
+      return (`Consumed (!consumed, `Need missing_len))
+    else begin
+      write_st w st >>= fun () ->
+      current_header := None ;
+      read_header buf ~pos ~len
+    end
+  and read_header buf ~pos ~len =
+    assert (Option.is_none !current_header) ;
+    if !consumed = len then return `Continue
+    else match parse buf ~pos:(pos + !consumed) ~len:(len - !consumed) with
+      | `More n -> return (`Consumed (!consumed, `Need n))
+      | `Ok (h, read) ->
+        consumed := !consumed + read ;
+        if h.length = 0 then
+          Pipe.write w (Header h) >>= fun () ->
+          read_header buf ~pos ~len
+        else begin
+          current_header := Some (create_st h) ;
+          read_payload buf ~pos ~len
+        end in
+  fun buf ~pos ~len ->
+    consumed := 0 ;
+    Log_async.info (fun m -> m "handle_chunk %d %d" pos len) >>= fun () ->
+    match !current_header with
+    | None -> read_header buf ~pos ~len
+    | Some _ -> read_payload buf ~pos ~len
 
 let mk_client_read r =
   Pipe.create_reader ~close_on_exception:false begin fun w ->
