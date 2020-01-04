@@ -10,7 +10,7 @@ open Async
 
 open Fastws
 
-let src = Logs.Src.create "fastws.async"
+let src = Logs.Src.create "fastws.async.raw"
 module Log = (val Logs.src_log src : Logs.LOG)
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
@@ -145,7 +145,6 @@ let handle_chunk w =
     Bigstring.blit ~src:buf ~src_pos:(pos + !consumed) ~dst:st.payload ~dst_pos:st.pos ~len:will_read ;
     st.pos <- st.pos + will_read ;
     consumed := !consumed + will_read ;
-    Log_async.info (fun m -> m "Consumed total %d/%d" !consumed len) >>= fun () ->
     let missing_len = wanted_len - will_read in
     if missing_len > 0 then
       return (`Consumed (!consumed, `Need missing_len))
@@ -170,7 +169,6 @@ let handle_chunk w =
         end in
   fun buf ~pos ~len ->
     consumed := 0 ;
-    Log_async.info (fun m -> m "handle_chunk %d %d" pos len) >>= fun () ->
     match !current_header with
     | None -> read_header buf ~pos ~len
     | Some _ -> read_payload buf ~pos ~len

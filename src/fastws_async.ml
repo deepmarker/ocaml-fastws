@@ -3,7 +3,7 @@ open Async
 open Fastws
 open Fastws_async_raw
 
-let src = Logs.Src.create "fastws.async.ez"
+let src = Logs.Src.create "fastws.async"
 module Log = (val Logs.src_log src : Logs.LOG)
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
@@ -93,20 +93,20 @@ let process rd st client_w r w ({ header ; payload } as frame) =
   | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
   | Pong ->
     begin match payload with
-      | None -> Log.info (fun m -> m "got unsollicited pong, do nothing")
+      | None -> Log_async.info (fun m -> m "got unsollicited pong with no payload")
       | Some payload -> try
           let now = Time_ns.now () in
           let old = Time_ns.of_string (Bigstring.to_string payload) in
           let diff = Time_ns.diff now old in
           st.latency_sum <- Time_ns.Span.(st.latency_sum + diff) ;
-          Log.info (fun m -> m "<- PONG %a" Time_ns.Span.pp diff) ;
+          Log_async.debug (fun m -> m "<- PONG %a" Time_ns.Span.pp diff) >>= fun () ->
           let i = Histogram.compute_bucket st.latency_base diff in
           if i < Array.length st.latency then
-            st.latency.(i) <- succ st.latency.(i)
+            st.latency.(i) <- succ st.latency.(i) ;
+          Deferred.unit
         with _ ->
-          Log.info (fun m -> m "got unsollicited pong, do nothing")
-    end ;
-    Deferred.unit
+          Log_async.info (fun m -> m "got unsollicited pong with payload")
+    end
   | Text
   | Binary -> begin match payload with
       | None -> Deferred.unit
@@ -125,7 +125,7 @@ let heartbeat w span =
   let terminated = Ivar.create () in
   let stop = Deferred.any [Pipe.closed w; Ivar.read terminated] in
   let write_ping () =
-    Log.info (fun m -> m "-> PING") ;
+    Log_async.debug (fun m -> m "-> PING") >>= fun () ->
     let ping = Fastws.pingf "%a" Time_ns.pp (Time_ns.now ()) in
     Fastws_async_raw.write_frame w ping in
   Clock_ns.after span >>> fun () ->
