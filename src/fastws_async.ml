@@ -42,7 +42,7 @@ module Histogram = struct
 
   let compute_bucket base diff =
     let open Float in
-    to_int (round_up (log ((Time_ns.Span.to_sec diff *. base) /. log 2.)))
+    to_int (round_up (log (Time_ns.Span.to_sec diff *. base) /. log 2.))
 
   let add t latency =
     let b = compute_bucket t.base latency in
