@@ -6,7 +6,7 @@ module Log = (val Logs.src_log src : Logs.LOG)
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 let main url =
-  Fastws_async.with_connection ~of_string:Fn.id ~to_string:Fn.id url begin fun _ r w ->
+  Fastws_async.with_connection ~of_string:Fn.id ~to_string:Fn.id url begin fun r w ->
     Deferred.all_unit [
       Pipe.transfer Reader.(pipe @@ Lazy.force stdin) w ~f:begin fun s ->
         String.chop_suffix_exn s ~suffix:"\n"

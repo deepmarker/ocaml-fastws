@@ -13,45 +13,17 @@ type st = {
   binary : bool ;
   mutable header : Fastws.t option ;
   mutable to_read : int ;
-  latency_base : float ;
-  mutable latency_sum : Time_ns.Span.t ;
-  latency : int array ;
+  on_pong : Time_ns.Span.t option -> unit ;
 }
 
-let create_st ?(latency_base=1e3) binary = {
+let create_st ?(on_pong=Fn.ignore) binary = {
   buf = Bigbuffer.create 13 ;
   monitor = Monitor.create () ;
   header = None ;
   binary ;
   to_read = 0 ;
-  latency_base ;
-  latency_sum = Time_ns.Span.zero ;
-  latency = Array.create ~len:20 0 ;
+  on_pong ;
 }
-
-module Histogram = struct
-  type t = {
-    base: float ;
-    mutable sum: Time_ns.Span.t ;
-    values: int array ;
-  }
-
-  let create ?(base=1e3) len = {
-    base ; sum = Time_ns.Span.zero ; values = Array.create ~len 0
-  }
-
-  let compute_bucket base diff =
-    let open Float in
-    to_int (round_up (log (Time_ns.Span.to_sec diff *. base) /. log 2.))
-
-  let add t latency =
-    let b = compute_bucket t.base latency in
-    t.sum <- Time_ns.Span.(t.sum + latency) ;
-    t.values.(b) <- succ t.values.(b)
-end
-
-let histogram { latency_base; latency_sum; latency; _ } =
-  { Histogram.base = latency_base ; sum = latency_sum ; values = latency }
 
 let reassemble st t =
   if is_header t then Bigbuffer.clear st.buf ;
@@ -93,16 +65,15 @@ let process rd st client_w r w ({ header ; payload } as frame) =
   | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
   | Pong ->
     begin match payload with
-      | None -> Log_async.info (fun m -> m "got unsollicited pong with no payload")
+      | None ->
+        st.on_pong None ;
+        Log_async.info (fun m -> m "got unsollicited pong with no payload")
       | Some payload -> try
           let now = Time_ns.now () in
           let old = Time_ns.of_string (Bigstring.to_string payload) in
           let diff = Time_ns.diff now old in
-          st.latency_sum <- Time_ns.Span.(st.latency_sum + diff) ;
           Log_async.debug (fun m -> m "<- PONG %a" Time_ns.Span.pp diff) >>= fun () ->
-          let i = Histogram.compute_bucket st.latency_base diff in
-          if i < Array.length st.latency then
-            st.latency.(i) <- succ st.latency.(i) ;
+          st.on_pong (Some diff) ;
           Deferred.unit
         with _ ->
           Log_async.info (fun m -> m "got unsollicited pong with payload")
@@ -160,16 +131,15 @@ let mk_client_write wr st w =
   end
 
 type ('r, 'w) t = {
-  st: st ;
   r: 'r Pipe.Reader.t ;
   w: 'w Pipe.Writer.t ;
 }
 
-let create st r w = { st; r; w }
+let create r w = { r; w }
 
-let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base ~of_string ~to_string url =
+let connect ?on_pong ?crypto ?(binary=false) ?extra_headers ?hb ~of_string ~to_string url =
   connect ?crypto ?extra_headers url >>= fun (r, w) ->
-  let st = create_st ?latency_base binary in
+  let st = create_st ?on_pong binary in
   Monitor.detach_and_iter_errors st.monitor ~f:begin fun exn ->
     Log.err (fun m -> m "%a" Exn.pp exn) ;
     Pipe.close_read r ;
@@ -183,12 +153,12 @@ let connect ?crypto ?(binary=false) ?extra_headers ?hb ?latency_base ~of_string 
   (Pipe.closed client_read  >>> fun () -> Pipe.close_read r) ;
   (Deferred.all_unit [Pipe.closed client_write;
                       Pipe.closed client_read] >>> fun () -> Pipe.close w) ;
-  return (create st client_read client_write)
+  return (create client_read client_write)
 
 let with_connection
-    ?crypto ?binary ?extra_headers ?hb ?latency_base ~of_string ~to_string uri f =
-  connect ?binary ?extra_headers ?hb ?latency_base ?crypto ~of_string ~to_string uri >>= fun { st; r; w } ->
-  Monitor.protect (fun () -> f st r w) ~finally:begin fun () ->
+    ?on_pong ?crypto ?binary ?extra_headers ?hb ~of_string ~to_string uri f =
+  connect ?on_pong ?binary ?extra_headers ?hb ?crypto ~of_string ~to_string uri >>= fun { r; w } ->
+  Monitor.protect (fun () -> f r w) ~finally:begin fun () ->
     Pipe.close_read r ;
     Pipe.close w ;
     Deferred.unit
