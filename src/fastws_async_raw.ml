@@ -91,7 +91,7 @@ let flush stream w =
     ~yield:(fun _ -> Scheduler.yield ())
     ~writev:(fun iovecs -> return (write_iovecs w iovecs))
 
-let mk_client_write w =
+let mk_client_write ~monitor w =
   let rec inner r hdr =
     Pipe.read r >>= function
     | `Eof -> Deferred.unit
@@ -116,8 +116,10 @@ let mk_client_write w =
         inner r hdr
       | _ -> failwith "current header must exist" in
   Pipe.create_writer begin fun r ->
-    if Writer.is_closed w then Deferred.unit
-    else inner r None
+    Scheduler.within' ~monitor begin fun () ->
+      if Writer.is_closed w then Deferred.unit
+      else inner r None
+    end
   end
 
 type st = {
@@ -173,11 +175,13 @@ let handle_chunk w =
     | None -> read_header buf ~pos ~len
     | Some _ -> read_payload buf ~pos ~len
 
-let mk_client_read r =
+let mk_client_read ~monitor r =
   Pipe.create_reader ~close_on_exception:false begin fun w ->
-    let handle_chunk = handle_chunk w in
-    Reader.read_one_chunk_at_a_time r ~handle_chunk >>| fun _ ->
-    Pipe.close w
+    Scheduler.within' ~monitor begin fun () ->
+      let handle_chunk = handle_chunk w in
+      Reader.read_one_chunk_at_a_time r ~handle_chunk >>| fun _ ->
+      Pipe.close w
+    end
   end
 
 let initialize ?timeout ?(extra_headers=Headers.empty) url r w =
@@ -217,9 +221,14 @@ let connect
     ?interrupt ?reader_buffer_size ?writer_buffer_size ?timeout
     url >>= fun (_sock, _conn, r, w) ->
   initialize ?timeout ?extra_headers url r w >>| fun _resp ->
-  let client_read  = mk_client_read r in
-  let client_write = mk_client_write w in
-  don't_wait_for (Deferred.all_unit Pipe.[closed client_read; closed client_write] >>= fun () ->
+  let monitor = Monitor.create () in
+  let client_read  = mk_client_read ~monitor r in
+  let client_write = mk_client_write ~monitor w in
+  let log_exn exn = Log.err (fun m -> m "%a" Exn.pp exn) in
+  Monitor.detach_and_iter_errors monitor ~f:log_exn ;
+  Monitor.detach_and_iter_errors (Writer.monitor w) ~f:log_exn ;
+  don't_wait_for (Deferred.all_unit Pipe.[closed client_read;
+                                          closed client_write] >>= fun () ->
                   Writer.close w >>= fun () ->
                   Reader.close r) ;
   client_read, client_write
