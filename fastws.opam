@@ -1,0 +1,18 @@
+opam-version: "2.0"
+authors: "Vincent Bernardoff <vb@luminar.eu.org>"
+maintainer: "Vincent Bernardoff <vb@luminar.eu.org>"
+homepage: "https://github.com/vbmithr/ocaml-fastws"
+bug-reports: "https://github.com/vbmithr/ocaml-fastws/issues"
+dev-repo: "git+https://github.com/vbmithr/ocaml-fastws"
+doc: "https://vbmithr.github.io/ocaml-fastws/doc"
+build: [ "dune" "build" "-j" jobs "-p" name ]
+run-test: [ "dune" "runtest" "-j" jobs "-p" name ]
+depends: [
+  "dune" {>= "1.11.4"}
+  "sexplib" {>= "v0.12.0"}
+  "faraday" {>= "0.7.0"}
+  "httpaf" {>= "0.6.5"}
+]
+synopsis: "Fast websocket library"
+description: """
+"""
