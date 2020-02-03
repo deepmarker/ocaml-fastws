@@ -50,7 +50,7 @@ let response_handler iv nonce crypto r _body =
     Base64.encode_exn (Crypto.(sha_1 (of_string (nonce ^ websocket_uuid)) |> to_string)) in
   match r.version, r.status, upgrade_hdr, sec_ws_accept_hdr with
   | { major = 1 ; minor = 1 }, `Switching_protocols,
-    Some "websocket", Some v when v = expected_sec ->
+    Some "websocket", Some v when String.equal v expected_sec ->
     Ivar.fill_if_empty iv (Ok r)
   | _ ->
     Log.err (fun m -> m "Invalid response %a" Response.pp_hum r) ;

@@ -16,7 +16,7 @@ val write_frame : t Pipe.Writer.t -> Fastws.frame -> unit Deferred.t
 
 val connect:
   ?version:Async_ssl.Version.t ->
-  ?options:Async_ssl.Opt.t sexp_list ->
+  ?options:Async_ssl.Opt.t list ->
   ?socket:([ `Unconnected ], Socket.Address.Inet.t) Socket.t ->
   ?buffer_age_limit:[ `At_most of Time.Span.t | `Unlimited ] ->
   ?interrupt:unit Deferred.t ->

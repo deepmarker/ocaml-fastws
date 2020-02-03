@@ -39,10 +39,13 @@ let frame =
     match a, b with
     | { header ; payload = None},
       { header = header' ; payload = None } ->
-      header = header'
+      Fastws.equal header header'
     | { header ; payload = Some p},
       { header = header' ; payload = Some p' } ->
-      header = header' && p = p'
+      Fastws.equal header header' &&
+      let open Bigstringaf in
+      let len = length p in
+      len = length p' && unsafe_memcmp p 0 p' 0 len = 0
     | _ -> false
   end
 
