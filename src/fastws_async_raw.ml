@@ -210,16 +210,16 @@ let initialize ?timeout ?(extra_headers=Headers.empty) url r w =
   | Ok v -> Deferred.return v
 
 let connect
-    ?version ?options ?socket ?buffer_age_limit
-    ?interrupt ?reader_buffer_size ?writer_buffer_size
-    ?timeout
+    ?version ?options ?socket
     ?(crypto = (module Crypto : CRYPTO))
-    ?extra_headers url =
+    ?extra_headers ?buffer_age_limit
+    ?interrupt ?reader_buffer_size ?writer_buffer_size
+    ?timeout url =
   let module Crypto = (val crypto : CRYPTO) in
   Async_uri.connect
     ?version ?options ?socket ?buffer_age_limit
     ?interrupt ?reader_buffer_size ?writer_buffer_size ?timeout
-    url >>= fun (_sock, _conn, r, w) ->
+    url >>= fun { r; w; _ } ->
   initialize ?timeout ?extra_headers url r w >>| fun _resp ->
   let monitor = Monitor.create () in
   let client_read  = mk_client_read ~monitor r in

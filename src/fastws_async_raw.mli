@@ -18,11 +18,6 @@ val connect:
   ?version:Async_ssl.Version.t ->
   ?options:Async_ssl.Opt.t list ->
   ?socket:([ `Unconnected ], Socket.Address.Inet.t) Socket.t ->
-  ?buffer_age_limit:[ `At_most of Time.Span.t | `Unlimited ] ->
-  ?interrupt:unit Deferred.t ->
-  ?reader_buffer_size:int ->
-  ?writer_buffer_size:int ->
-  ?timeout:Time.Span.t ->
   ?crypto:(module Fastws.CRYPTO) ->
   ?extra_headers:Httpaf.Headers.t ->
-  Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t
+  (Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t) Tcp.with_connect_options
