@@ -3,7 +3,10 @@
  (modules    test)
  (preprocess (pps ppx_let ppx_sexp_conv))
  (package    fastws-async)
- (libraries logs-async-reporter fastws-async alcotest-async))
+ (libraries
+   fastws-async
+   alcotest
+   alcotest-async))
 
 (executables
  (names leak wscat)

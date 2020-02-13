@@ -17,8 +17,8 @@ depends: [
   "logs-async" {= version}
   "faraday-async" {>= "0.7.0"}
   "async-uri" {= version}
-  "logs-async-reporter" {with-test & = version}
-  "alcotest-async" {with-test & >= "0.8.5"}
+  "alcotest" {with-test & >= "1.0.0"}
+  "alcotest-async" {with-test & >= "1.0.0"}
 ]
 synopsis: "Fast websocket library"
 description: """

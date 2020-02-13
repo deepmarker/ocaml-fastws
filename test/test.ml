@@ -5,10 +5,6 @@ open Fastws
 open Fastws_async_raw
 open Fastws_async
 
-let () =
-  Logs.set_level (Some Debug) ;
-  Logs.set_reporter (Logs_async_reporter.reporter ())
-
 let frames = [
   "empty text"        , textf "" ;
   "text with content" , textf "test" ;
@@ -78,8 +74,6 @@ let roundtrip ?mask descr frames () =
     end
   in
   let frames' = inner [] 0 in
-  List.iter ~f:(fun { header ; _ } ->
-      Logs.debug (fun m -> m "%a" Fastws.pp header)) frames' ;
   check int "roundtrip list size" (List.length frames) (List.length frames') ;
   List.iter2_exn ~f:begin fun f f' ->
     check frame descr { f with header = { f.header with mask } } f'
@@ -135,24 +129,26 @@ let with_connection_ez () =
     | `Ok msg' -> check string "" msg msg'
   end
 
+open Alcotest_async
+
 let roundtrip_unmasked =
   List.map
-    ~f:(fun (n, f) -> n, `Quick, roundtrip n f)
+    ~f:(fun (n, f) -> test_case_sync n `Quick (roundtrip n f))
     (List.map ~f:(fun (s, f) -> s, [f]) frames)
 
 let roundtrip_masked =
   List.map ~f:begin fun (n, f) ->
-    n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
+    test_case_sync n `Quick (roundtrip ~mask:(Crypto.generate 4) n f)
   end
     (List.map ~f:(fun (s, f) -> s, [f]) frames)
 
 let roundtrip_unmasked_multi =
   List.map
-    ~f:(fun (n, f) -> n, `Quick, roundtrip n f) multiframes
+    ~f:(fun (n, f) -> test_case_sync n `Quick (roundtrip n f)) multiframes
 
 let roundtrip_masked_multi =
   List.map ~f:begin fun (n, f) ->
-    n, `Quick, roundtrip ~mask:(Crypto.generate 4) n f
+    test_case_sync n `Quick (roundtrip ~mask:(Crypto.generate 4) n f)
   end multiframes
 
 let async = Alcotest_async.[
@@ -161,8 +157,8 @@ let async = Alcotest_async.[
     test_case "with_connection_ez" `Quick with_connection_ez ;
   ]
 
-let () =
-  Alcotest.run "fastws" [
+let main () =
+  run "fastws" [
     "roundtrip", roundtrip_unmasked ;
     "roundtrip_masked", roundtrip_masked ;
     "roundtrip_multi", roundtrip_unmasked_multi ;
@@ -170,3 +166,6 @@ let () =
     "async", async ;
   ]
 
+let () =
+  don't_wait_for (main ()) ;
+  never_returns (Scheduler.go ())
