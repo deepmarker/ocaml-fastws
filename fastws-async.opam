@@ -8,12 +8,13 @@ doc: "https://vbmithr.github.io/ocaml-fastws/doc"
 build: [ "dune" "build" "-j" jobs "-p" name ]
 run-test: [ "dune" "runtest" "-j" jobs "-p" name ]
 depends: [
+  "ocaml" {>= "4.08.0"}
   "dune" {>= "1.11.4"}
   "base64" {>= "3.2.0"}
   "uri-sexp" {>= "3.1.0"}
   "fastws" {= version}
-  "core" {>= "v0.12.0"}
-  "async" {>= "v0.12.0"}
+  "core" {>= "v0.13.0"}
+  "async" {>= "v0.13.0"}
   "logs-async" {= version}
   "faraday-async" {>= "0.7.0"}
   "async-uri" {= version}

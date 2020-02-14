@@ -1,14 +1,14 @@
 (library
  (name fastws)
  (public_name fastws)
- (preprocess (pps ppx_here ppx_sexp_conv))
+ (preprocess (pps ppx_sexp_conv))
  (modules fastws sha1)
  (libraries sexplib faraday httpaf))
 
 (library
  (name fastws_async)
  (public_name fastws-async)
- (preprocess (pps ppx_here ppx_sexp_conv))
+ (preprocess (pps ppx_sexp_conv))
  (modules fastws_async_raw fastws_async)
  (wrapped false)
  (libraries

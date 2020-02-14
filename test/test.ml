@@ -151,7 +151,7 @@ let roundtrip_masked_multi =
     test_case_sync n `Quick (roundtrip ~mask:(Crypto.generate 4) n f)
   end multiframes
 
-let async = Alcotest_async.[
+let async = [
     test_case "connect" `Quick connect ;
     test_case "connect_ez" `Quick connect_ez ;
     test_case "with_connection_ez" `Quick with_connection_ez ;

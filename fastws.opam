@@ -8,8 +8,10 @@ doc: "https://vbmithr.github.io/ocaml-fastws/doc"
 build: [ "dune" "build" "-j" jobs "-p" name ]
 run-test: [ "dune" "runtest" "-j" jobs "-p" name ]
 depends: [
+  "ocaml" {>= "4.08.0"}
   "dune" {>= "1.11.4"}
-  "sexplib" {>= "v0.12.0"}
+  "sexplib" {>= "v0.13.0"}
+  "ppx_sexp_conv" {>= "v0.13.0"}
   "faraday" {>= "0.7.0"}
   "httpaf" {>= "0.6.5"}
 ]
