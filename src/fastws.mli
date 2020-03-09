@@ -117,7 +117,7 @@ val closef :
 
 val xormask : mask:string -> Bigstringaf.t -> unit
 
-type parse_result = [ `More of int | `Ok of t * int ]
+type parse_result = [ `Need of int | `Ok of t * int ]
 
 val parse : ?pos:int -> ?len:int -> Bigstringaf.t -> parse_result
 

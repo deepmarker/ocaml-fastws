@@ -139,24 +139,28 @@ let handle_chunk w =
     st.pos <- st.pos + will_read;
     consumed := !consumed + will_read;
     let missing_len = wanted_len - will_read in
-    if missing_len > 0 then return (`Consumed (!consumed, `Need missing_len))
+    if missing_len > 0 then (
+      assert (missing_len > len - !consumed);
+      return (`Consumed (!consumed, `Need missing_len)) )
     else
       write_st w st >>= fun () ->
       current_header := None;
       read_header buf ~pos ~len
   and read_header buf ~pos ~len =
     assert (Option.is_none !current_header);
-    if !consumed = len then return `Continue
-    else
-      match parse buf ~pos:(pos + !consumed) ~len:(len - !consumed) with
-      | `More n -> return (`Consumed (!consumed, `Need n))
-      | `Ok (h, read) ->
-          consumed := !consumed + read;
-          if h.length = 0 then
-            Pipe.write w (Header h) >>= fun () -> read_header buf ~pos ~len
-          else (
-            current_header := Some (create_st h);
-            read_payload buf ~pos ~len )
+    match len - !consumed with
+    | 0 -> return `Continue
+    | 1 -> return (`Consumed (!consumed, `Need 2))
+    | _ -> (
+        match parse buf ~pos:(pos + !consumed) ~len:(len - !consumed) with
+        | `Need n -> return (`Consumed (!consumed, `Need n))
+        | `Ok (h, read) ->
+            consumed := !consumed + read;
+            if h.length = 0 then
+              Pipe.write w (Header h) >>= fun () -> read_header buf ~pos ~len
+            else (
+              current_header := Some (create_st h);
+              read_payload buf ~pos ~len ) )
   in
   fun buf ~pos ~len ->
     consumed := 0;
