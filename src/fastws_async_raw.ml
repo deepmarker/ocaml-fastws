@@ -106,6 +106,10 @@ let mk_client_write ~monitor w =
             Faraday.write_bigstring serializer buf;
             Faraday.close serializer;
             xormask ~mask buf;
+            let buf_str =
+              Bigstring.(to_string buf ~pos:0 ~len:(min 1024 (length buf)))
+            in
+            Log_async.debug (fun m -> m "-> %s" buf_str) >>= fun () ->
             flush serializer w >>= fun () -> inner r hdr
         | _ -> failwith "current header must exist" )
   in
