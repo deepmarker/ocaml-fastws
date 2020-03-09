@@ -6,18 +6,17 @@
 open Core
 open Async
 
-type t =
-  | Header of Fastws.t
-  | Payload of Bigstring.t
-[@@deriving sexp_of]
+type t = Header of Fastws.t | Payload of Bigstring.t [@@deriving sexp_of]
 
 val is_header : t -> bool
+
 val write_frame : t Pipe.Writer.t -> Fastws.frame -> unit Deferred.t
 
-val connect:
+val connect :
   ?version:Async_ssl.Version.t ->
   ?options:Async_ssl.Opt.t list ->
   ?socket:([ `Unconnected ], Socket.Address.Inet.t) Socket.t ->
   ?crypto:(module Fastws.CRYPTO) ->
   ?extra_headers:Httpaf.Headers.t ->
-  (Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t) Tcp.with_connect_options
+  (Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t)
+  Tcp.with_connect_options
