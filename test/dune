@@ -2,10 +2,19 @@
  (name       test)
  (modules    test)
  (preprocess (pps ppx_sexp_conv))
+ (package    fastws)
+ (libraries
+   fastws
+   alcotest))
+
+(test
+ (name       test_async)
+ (modules    test_async)
+ (preprocess (pps ppx_sexp_conv))
  (package    fastws-async)
  (libraries
-   fastws-async
    core
    async
+   fastws-async
    alcotest
    alcotest-async))

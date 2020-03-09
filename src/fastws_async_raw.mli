@@ -5,12 +5,13 @@
 
 open Core
 open Async
+open Fastws
 
-type t = Header of Fastws.t | Payload of Bigstring.t [@@deriving sexp_of]
+type t = Header of Header.t | Payload of Bigstring.t [@@deriving sexp_of]
 
 val is_header : t -> bool
 
-val write_frame : t Pipe.Writer.t -> Fastws.frame -> unit Deferred.t
+val write_frame : t Pipe.Writer.t -> Frame.t -> unit Deferred.t
 
 val connect :
   ?version:Async_ssl.Version.t ->

@@ -13,7 +13,7 @@ type st = {
   buf : Bigbuffer.t;
   monitor : Monitor.t;
   binary : bool;
-  mutable header : Fastws.t option;
+  mutable header : Header.t option;
   mutable to_read : int;
   on_pong : Time_ns.Span.t option -> unit;
 }
@@ -39,13 +39,13 @@ let reassemble st t =
       Some ({ final = false; _ } as h') ) ->
       Format.kasprintf
         (fun msg -> `Fail msg)
-        "unfinished continuation: %a@.%a" Fastws.pp h Fastws.pp h'
+        "unfinished continuation: %a@.%a" Header.pp h Header.pp h'
   | Header { opcode = Continuation; length; _ }, _ ->
       st.to_read <- length;
       `Continue
   | Header ({ length = 0; final = true; _ } as h), _ ->
       st.header <- None;
-      `Frame { header = h; payload = None }
+      `Frame { Frame.header = h; payload = None }
   | Header h, _ ->
       st.header <- Some h;
       st.to_read <- h.length;
@@ -60,14 +60,14 @@ let reassemble st t =
           Bigbuffer.add_bigstring st.buf b;
           st.header <- None;
           let payload = Bigbuffer.big_contents st.buf in
-          `Frame { header = h; payload = Some payload }
+          `Frame { Frame.header = h; payload = Some payload }
       | false ->
           Bigbuffer.add_bigstring st.buf b;
           st.to_read <- st.to_read - buflen;
           `Continue )
 
-let process rd st client_w r w ({ header; payload } as frame) =
-  Log_async.debug (fun m -> m "<- %a" pp_frame frame) >>= fun () ->
+let process rd st client_w r w ({ Frame.header; payload } as frame) =
+  Log_async.debug (fun m -> m "<- %a" Frame.pp frame) >>= fun () ->
   match header.opcode with
   | Ping -> write_frame w { header = { header with opcode = Pong }; payload }
   | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
@@ -96,7 +96,8 @@ let process rd st client_w r w ({ header; payload } as frame) =
           Pipe.write client_w (rd payload) )
   | Continuation -> assert false
   | Ctrl _ | Nonctrl _ ->
-      write_frame w (close ~status:Status.UnsupportedExtension "") >>| fun () ->
+      write_frame w (Frame.close ~status:Status.UnsupportedExtension "")
+      >>| fun () ->
       Pipe.close w;
       Pipe.close_read r
 
@@ -105,7 +106,7 @@ let heartbeat w span =
   let stop = Deferred.any [ Pipe.closed w; Ivar.read terminated ] in
   let write_ping () =
     Log_async.debug (fun m -> m "-> PING") >>= fun () ->
-    let ping = Fastws.pingf "%a" Time_ns.pp (Time_ns.now ()) in
+    let ping = Frame.pingf "%a" Time_ns.pp (Time_ns.now ()) in
     Fastws_async_raw.write_frame w ping
   in
   Clock_ns.after span >>> fun () ->
@@ -124,10 +125,10 @@ let mk_client_read rd st ws_write r =
 let mk_client_write wr st w =
   Pipe.create_writer (fun ws_read ->
       Pipe.iter ws_read ~f:(fun m ->
-          let { header; payload } =
+          let { Frame.header; payload } =
             match st.binary with
-            | true -> Fastws.binary (wr m)
-            | false -> Fastws.text (wr m)
+            | true -> Frame.binary (wr m)
+            | false -> Frame.text (wr m)
           in
           Scheduler.within' ~monitor:st.monitor (fun () ->
               Pipe.write w (Header header) >>= fun () ->

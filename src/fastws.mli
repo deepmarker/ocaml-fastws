@@ -24,8 +24,8 @@ module Crypto : CRYPTO with type buffer = string
 val websocket_uuid : string
 
 val headers : ?protocols:string list -> string -> Headers.t
-(** [headers ?protocols nonce] are headers for client handshake, where
-    [nonce] is a "raw" nonce string (not Base64-encoded). *)
+(** [headers ?protocols nonce] are HTTP headers for client handshake,
+   where [nonce] is a "raw" nonce string (not Base64-encoded). *)
 
 module Status : sig
   type t =
@@ -66,59 +66,66 @@ module Opcode : sig
   val pp : Format.formatter -> t -> unit
 end
 
-type t = {
-  opcode : Opcode.t;
-  rsv : int;
-  final : bool;
-  length : int;
-  mask : string option;
-}
-[@@deriving sexp]
+module Header : sig
+  type t = {
+    opcode : Opcode.t;
+    rsv : int;
+    final : bool;
+    length : int;
+    mask : string option;
+  }
+  [@@deriving sexp]
 
-val compare : t -> t -> int
+  val compare : t -> t -> int
 
-val equal : t -> t -> bool
+  val equal : t -> t -> bool
 
-val pp : Format.formatter -> t -> unit
+  val pp : Format.formatter -> t -> unit
 
-val show : t -> string
+  val show : t -> string
 
-val create :
-  ?rsv:int -> ?final:bool -> ?length:int -> ?mask:string -> Opcode.t -> t
+  val create :
+    ?rsv:int -> ?final:bool -> ?length:int -> ?mask:string -> Opcode.t -> t
 
-type frame = { header : t; payload : Bigstringaf.t option }
+  val xormask : mask:string -> Bigstringaf.t -> unit
 
-val pp_frame : Format.formatter -> frame -> unit
+  type parse_result = [ `Need of int | `Ok of t * int ]
 
-val text : string -> frame
+  val parse : ?pos:int -> ?len:int -> Bigstringaf.t -> parse_result
 
-val binary : string -> frame
+  val serialize : Faraday.t -> t -> unit
+end
 
-val close : ?status:Status.t -> string -> frame
+module Frame : sig
+  type t = { header : Header.t; payload : Bigstringaf.t option }
 
-val is_text : frame -> bool
+  val compare : t -> t -> int
 
-val is_binary : frame -> bool
+  val equal : t -> t -> bool
 
-val is_close : frame -> bool
+  val pp : Format.formatter -> t -> unit
 
-val createf : Opcode.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
+  val text : string -> t
 
-val pingf : ('a, Format.formatter, unit, frame) format4 -> 'a
+  val binary : string -> t
 
-val pongf : ('a, Format.formatter, unit, frame) format4 -> 'a
+  val close : ?status:Status.t -> string -> t
 
-val textf : ('a, Format.formatter, unit, frame) format4 -> 'a
+  val is_text : t -> bool
 
-val binaryf : ('a, Format.formatter, unit, frame) format4 -> 'a
+  val is_binary : t -> bool
 
-val closef :
-  ?status:Status.t -> ('a, Format.formatter, unit, frame) format4 -> 'a
+  val is_close : t -> bool
 
-val xormask : mask:string -> Bigstringaf.t -> unit
+  val createf : Opcode.t -> ('a, Format.formatter, unit, t) format4 -> 'a
 
-type parse_result = [ `Need of int | `Ok of t * int ]
+  val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
 
-val parse : ?pos:int -> ?len:int -> Bigstringaf.t -> parse_result
+  val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
 
-val serialize : Faraday.t -> t -> unit
+  val textf : ('a, Format.formatter, unit, t) format4 -> 'a
+
+  val binaryf : ('a, Format.formatter, unit, t) format4 -> 'a
+
+  val closef : ?status:Status.t -> ('a, Format.formatter, unit, t) format4 -> 'a
+end

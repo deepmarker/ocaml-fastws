@@ -128,160 +128,182 @@ module Opcode = struct
     | Nonctrl i -> i
 end
 
-type t = {
-  opcode : Opcode.t;
-  rsv : int;
-  final : bool;
-  length : int;
-  mask : string option;
-}
-[@@deriving sexp]
+module Header = struct
+  type t = {
+    opcode : Opcode.t;
+    rsv : int;
+    final : bool;
+    length : int;
+    mask : string option;
+  }
+  [@@deriving sexp]
 
-let compare = Stdlib.compare
+  let compare = Stdlib.compare
 
-let equal = Stdlib.( = )
+  let equal = Stdlib.( = )
 
-let pp ppf t = Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t t)
+  let pp ppf t = Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t t)
 
-let show t = Format.asprintf "%a" pp t
+  let show t = Format.asprintf "%a" pp t
 
-let create ?(rsv = 0) ?(final = true) ?(length = 0) ?mask opcode =
-  { opcode; rsv; final; length; mask }
+  let create ?(rsv = 0) ?(final = true) ?(length = 0) ?mask opcode =
+    { opcode; rsv; final; length; mask }
 
-type frame = { header : t; payload : Bigstringaf.t option }
+  let xormask ~mask buf =
+    let open Bigstringaf in
+    let xor_char a b = Char.(chr (code a lxor code b)) in
+    for i = 0 to length buf - 1 do
+      set buf i (xor_char (get buf i) mask.[i mod 4])
+    done
 
-let pp_frame ppf = function
-  | { header; payload = None } ->
-      Format.fprintf ppf "%a" Sexplib.Sexp.pp (sexp_of_t header)
-  | { header = { opcode = Text; _ } as header; payload = Some payload } ->
-      Format.fprintf ppf "%a [%s]" Sexplib.Sexp.pp (sexp_of_t header)
-        Bigstringaf.(substring payload ~off:0 ~len:(min 1024 (length payload)))
-  | { header; payload = Some payload } ->
-      Format.fprintf ppf "%a [%S]" Sexplib.Sexp.pp (sexp_of_t header)
-        Bigstringaf.(substring payload ~off:0 ~len:(min 1024 (length payload)))
+  type parse_result = [ `Need of int | `Ok of t * int ]
 
-let kcreate opcode content =
-  match String.length content with
-  | 0 -> { header = create opcode; payload = None }
-  | len ->
-      let content = Bigstringaf.of_string ~off:0 ~len content in
-      {
-        header = create ~length:(Bigstringaf.length content) opcode;
-        payload = Some content;
-      }
+  let parse_aux buf pos len =
+    let get_finmask c = Char.code c land 0x80 <> 0 in
+    let get_rsv c = (Char.code c lsr 4) land 0x7 in
+    let get_len c = Char.code c land 0x7f in
+    let get_opcode c = Opcode.of_int (Char.code c land 0xf) in
+    let b1 = Bigstringaf.get buf pos in
+    let b2 = Bigstringaf.get buf (pos + 1) in
+    let final = get_finmask b1 in
+    let rsv = get_rsv b1 in
+    let opcode = get_opcode b1 in
+    let masked = get_finmask b2 in
+    let frame_len = get_len b2 in
+    match (frame_len, masked) with
+    | 126, false ->
+        if len < 4 then `Need 4
+        else
+          let length = Bigstringaf.get_int16_be buf (pos + 2) in
+          `Ok (create ~final ~rsv ~length opcode, 4)
+    | 126, true ->
+        if len < 8 then `Need 8
+        else
+          let length = Bigstringaf.get_int16_be buf (pos + 2) in
+          let mask = Bigstringaf.substring buf ~off:(pos + 4) ~len:4 in
+          `Ok (create ~final ~rsv ~length ~mask opcode, 8)
+    | 127, false ->
+        if len < 10 then `Need 10
+        else
+          let length = Bigstringaf.get_int64_be buf (pos + 2) in
+          let length = Int64.to_int length in
+          `Ok (create ~final ~rsv ~length opcode, 10)
+    | 127, true ->
+        if len < 14 then `Need 14
+        else
+          let length = Bigstringaf.get_int64_be buf (pos + 2) in
+          let length = Int64.to_int length in
+          let mask = Bigstringaf.substring buf ~off:(pos + 10) ~len:4 in
+          `Ok (create ~final ~rsv ~length ~mask opcode, 14)
+    | length, true ->
+        if len < 6 then `Need 6
+        else
+          let mask = Bigstringaf.substring buf ~off:(pos + 2) ~len:4 in
+          `Ok (create ~final ~rsv ~mask ~length opcode, 6)
+    | length, false -> `Ok (create ~final ~rsv ~length opcode, 2)
 
-let text msg = kcreate Text msg
+  let parse ?(pos = 0) ?len buf =
+    let len =
+      match len with Some len -> len | None -> Bigstringaf.length buf - pos
+    in
+    if pos < 0 || len < 2 || pos + len > Bigstringaf.length buf then
+      invalid_arg (Printf.sprintf "parse: pos = %d, len = %d" pos len);
+    parse_aux buf pos len
 
-let binary msg = kcreate Binary msg
+  let serialize t { opcode; rsv; final; length; mask } =
+    let open Faraday in
+    let b1 = Opcode.to_int opcode lor (rsv lsl 4) in
+    write_uint8 t (if final then 0x80 lor b1 else b1);
+    let len =
+      if length < 126 then length else if length < 1 lsl 16 then 126 else 127
+    in
+    write_uint8 t (match mask with None -> len | Some _ -> 0x80 lor len);
+    if len = 126 then BE.write_uint16 t length
+    else if len = 127 then BE.write_uint64 t (Int64.of_int length);
+    match mask with None -> () | Some mask -> write_string t mask
+end
 
-let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
+module Frame = struct
+  type t = { header : Header.t; payload : Bigstringaf.t option }
 
-let pingf fmt = Format.kasprintf (kcreate Ping) fmt
+  let compare a b =
+    match (a, b) with
+    | { header; payload = None }, { header = header'; payload = None } ->
+        Header.compare header header'
+    | { payload = Some _; _ }, { payload = None; _ } -> 1
+    | { payload = None; _ }, { payload = Some _; _ } -> -1
+    | { header; payload = Some p }, { header = header'; payload = Some p' } -> (
+        let lenp = Bigstringaf.length p in
+        let lenp' = Bigstringaf.length p' in
+        match Int.compare lenp lenp' with
+        | 0 -> (
+            match Bigstringaf.unsafe_memcmp p 0 p' 0 lenp with
+            | 0 -> Header.compare header header'
+            | n -> n )
+        | n -> n )
 
-let pongf fmt = Format.kasprintf (kcreate Pong) fmt
+  let equal a b = compare a b = 0
 
-let textf fmt = Format.kasprintf (kcreate Text) fmt
+  let pp ppf = function
+    | { header; payload = None } ->
+        Format.fprintf ppf "%a" Sexplib.Sexp.pp (Header.sexp_of_t header)
+    | { header = { opcode = Text; _ } as header; payload = Some payload } ->
+        Format.fprintf ppf "%a [%s]" Sexplib.Sexp.pp (Header.sexp_of_t header)
+          Bigstringaf.(
+            substring payload ~off:0 ~len:(min 1024 (length payload)))
+    | { header; payload = Some payload } ->
+        Format.fprintf ppf "%a [%S]" Sexplib.Sexp.pp (Header.sexp_of_t header)
+          Bigstringaf.(
+            substring payload ~off:0 ~len:(min 1024 (length payload)))
 
-let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
+  let kcreate opcode content =
+    match String.length content with
+    | 0 -> { header = Header.create opcode; payload = None }
+    | len ->
+        let content = Bigstringaf.of_string ~off:0 ~len content in
+        {
+          header = Header.create ~length:(Bigstringaf.length content) opcode;
+          payload = Some content;
+        }
 
-let kclose status msg =
-  let msglen = String.length msg in
-  let content = Bigstringaf.create (2 + msglen) in
-  Bigstringaf.set_int16_be content 0 (Status.to_int status);
-  Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen;
-  { header = create ~length:(2 + msglen) Close; payload = Some content }
+  let text msg = kcreate Text msg
 
-let close ?(status = Status.NormalClosure) msg = kclose status msg
+  let binary msg = kcreate Binary msg
 
-let closef ?(status = Status.NormalClosure) fmt =
-  Format.kasprintf (kclose status) fmt
+  let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
 
-let is_binary = function
-  | { header = { opcode = Binary; _ }; _ } -> true
-  | _ -> false
+  let pingf fmt = Format.kasprintf (kcreate Ping) fmt
 
-let is_text = function
-  | { header = { opcode = Text; _ }; _ } -> true
-  | _ -> false
+  let pongf fmt = Format.kasprintf (kcreate Pong) fmt
 
-let is_close = function
-  | { header = { opcode = Close; _ }; _ } -> true
-  | _ -> false
+  let textf fmt = Format.kasprintf (kcreate Text) fmt
 
-let get_finmask c = Char.code c land 0x80 <> 0
+  let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
 
-let get_rsv c = (Char.code c lsr 4) land 0x7
+  let kclose status msg =
+    let msglen = String.length msg in
+    let content = Bigstringaf.create (2 + msglen) in
+    Bigstringaf.set_int16_be content 0 (Status.to_int status);
+    Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen;
+    {
+      header = Header.create ~length:(2 + msglen) Close;
+      payload = Some content;
+    }
 
-let get_len c = Char.code c land 0x7f
+  let close ?(status = Status.NormalClosure) msg = kclose status msg
 
-let get_opcode c = Opcode.of_int (Char.code c land 0xf)
+  let closef ?(status = Status.NormalClosure) fmt =
+    Format.kasprintf (kclose status) fmt
 
-let xor_char a b = Char.(chr (code a lxor code b))
+  let is_binary = function
+    | { header = { opcode = Binary; _ }; _ } -> true
+    | _ -> false
 
-let xormask ~mask buf =
-  let open Bigstringaf in
-  for i = 0 to length buf - 1 do
-    set buf i (xor_char (get buf i) mask.[i mod 4])
-  done
+  let is_text = function
+    | { header = { opcode = Text; _ }; _ } -> true
+    | _ -> false
 
-type parse_result = [ `Need of int | `Ok of t * int ]
-
-let parse_aux buf pos len =
-  let b1 = Bigstringaf.get buf pos in
-  let b2 = Bigstringaf.get buf (pos + 1) in
-  let final = get_finmask b1 in
-  let rsv = get_rsv b1 in
-  let opcode = get_opcode b1 in
-  let masked = get_finmask b2 in
-  let frame_len = get_len b2 in
-  match (frame_len, masked) with
-  | 126, false ->
-      if len < 4 then `Need 4
-      else
-        let length = Bigstringaf.get_int16_be buf (pos + 2) in
-        `Ok (create ~final ~rsv ~length opcode, 4)
-  | 126, true ->
-      if len < 8 then `Need 8
-      else
-        let length = Bigstringaf.get_int16_be buf (pos + 2) in
-        let mask = Bigstringaf.substring buf ~off:(pos + 4) ~len:4 in
-        `Ok (create ~final ~rsv ~length ~mask opcode, 8)
-  | 127, false ->
-      if len < 10 then `Need 10
-      else
-        let length = Bigstringaf.get_int64_be buf (pos + 2) in
-        let length = Int64.to_int length in
-        `Ok (create ~final ~rsv ~length opcode, 10)
-  | 127, true ->
-      if len < 14 then `Need 14
-      else
-        let length = Bigstringaf.get_int64_be buf (pos + 2) in
-        let length = Int64.to_int length in
-        let mask = Bigstringaf.substring buf ~off:(pos + 10) ~len:4 in
-        `Ok (create ~final ~rsv ~length ~mask opcode, 14)
-  | length, true ->
-      if len < 6 then `Need 6
-      else
-        let mask = Bigstringaf.substring buf ~off:(pos + 2) ~len:4 in
-        `Ok (create ~final ~rsv ~mask ~length opcode, 6)
-  | length, false -> `Ok (create ~final ~rsv ~length opcode, 2)
-
-let parse ?(pos = 0) ?len buf =
-  let len =
-    match len with Some len -> len | None -> Bigstringaf.length buf - pos
-  in
-  if pos < 0 || len < 2 || pos + len > Bigstringaf.length buf then
-    invalid_arg (Printf.sprintf "parse: pos = %d, len = %d" pos len);
-  parse_aux buf pos len
-
-let serialize t { opcode; rsv; final; length; mask } =
-  let open Faraday in
-  let b1 = Opcode.to_int opcode lor (rsv lsl 4) in
-  write_uint8 t (if final then 0x80 lor b1 else b1);
-  let len =
-    if length < 126 then length else if length < 1 lsl 16 then 126 else 127
-  in
-  write_uint8 t (match mask with None -> len | Some _ -> 0x80 lor len);
-  if len = 126 then BE.write_uint16 t length
-  else if len = 127 then BE.write_uint64 t (Int64.of_int length);
-  match mask with None -> () | Some mask -> write_string t mask
+  let is_close = function
+    | { header = { opcode = Close; _ }; _ } -> true
+    | _ -> false
+end

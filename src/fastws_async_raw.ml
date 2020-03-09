@@ -14,7 +14,7 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
-type t = Header of Fastws.t | Payload of Bigstring.t [@@deriving sexp_of]
+type t = Header of Header.t | Payload of Bigstring.t [@@deriving sexp_of]
 
 let is_header = function Header _ -> true | _ -> false
 
@@ -25,7 +25,7 @@ let pp_client_connection_error ppf (e : Client_connection.error) =
       Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
   | `Malformed_response msg -> Format.fprintf ppf "Malformed response %s" msg
 
-let write_frame w { header; payload } =
+let write_frame w { Frame.header; payload } =
   Pipe.write w (Header header) >>= fun () ->
   match payload with
   | None -> Deferred.unit
@@ -94,18 +94,19 @@ let mk_client_write ~monitor w =
         let serializer = Faraday.create 6 in
         let mask = Crypto.(to_string (generate 4)) in
         let h = { t with mask = Some mask } in
-        serialize serializer h;
+        Header.serialize serializer h;
         Faraday.close serializer;
         flush serializer w >>= fun () ->
-        Log_async.debug (fun m -> m "-> %a" pp t) >>= fun () -> inner r (Some h)
+        Log_async.debug (fun m -> m "-> %a" Header.pp t) >>= fun () ->
+        inner r (Some h)
     | `Ok (Payload buf) -> (
         match hdr with
         | Some { mask = Some mask; _ } ->
             let serializer = Faraday.create (Bigstring.length buf + 6) in
-            xormask ~mask buf;
+            Header.xormask ~mask buf;
             Faraday.write_bigstring serializer buf;
             Faraday.close serializer;
-            xormask ~mask buf;
+            Header.xormask ~mask buf;
             let buf_str =
               Bigstring.(to_string buf ~pos:0 ~len:(min 1024 (length buf)))
             in
@@ -117,10 +118,10 @@ let mk_client_write ~monitor w =
       Scheduler.within' ~monitor (fun () ->
           if Writer.is_closed w then Deferred.unit else inner r None))
 
-type st = { h : Fastws.t; payload : Bigstring.t; mutable pos : int }
+type st = { h : Header.t; payload : Bigstring.t; mutable pos : int }
 
 let create_st h =
-  let payload = Bigstring.create h.length in
+  let payload = Bigstring.create h.Header.length in
   { h; payload; pos = 0 }
 
 let write_st w { h; payload; _ } =
@@ -152,7 +153,9 @@ let handle_chunk w =
     | 0 -> return `Continue
     | 1 -> return (`Consumed (!consumed, `Need 2))
     | _ -> (
-        match parse buf ~pos:(pos + !consumed) ~len:(len - !consumed) with
+        match
+          Header.parse buf ~pos:(pos + !consumed) ~len:(len - !consumed)
+        with
         | `Need n -> return (`Consumed (!consumed, `Need n))
         | `Ok (h, read) ->
             consumed := !consumed + read;

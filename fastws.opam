@@ -14,6 +14,7 @@ depends: [
   "ppx_sexp_conv" {>= "v0.13.0"}
   "faraday" {>= "0.7.0"}
   "httpaf" {>= "0.6.5"}
+  "alcotest" {with-test & >= "1.0.1"}
 ]
 synopsis: "Fast websocket library"
 description: """
