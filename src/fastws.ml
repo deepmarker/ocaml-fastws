@@ -132,6 +132,8 @@ module Opcode = struct
     | Pong -> 10
     | Ctrl i -> i
     | Nonctrl i -> i
+
+  let is_control = function Ping | Pong | Ctrl _ -> true | _ -> false
 end
 
 module Header = struct

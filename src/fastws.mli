@@ -63,6 +63,8 @@ module Opcode : sig
 
   val to_int : t -> int
 
+  val is_control : t -> bool
+
   val pp : Format.formatter -> t -> unit
 end
 

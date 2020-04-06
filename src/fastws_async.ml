@@ -31,28 +31,29 @@ let create_st ?(on_pong = Fn.ignore) () =
 let reassemble st t =
   if is_header t then Bigbuffer.clear st.buf;
   match (t, st.header) with
+  | Header { opcode; final = false; _ }, _ when Opcode.is_control opcode ->
+      Format.kasprintf Or_error.error_string "fragmented control frame"
   | ( Header ({ opcode = Text; final = true; _ } as h),
       Some ({ final = false; _ } as h') )
   | ( Header ({ opcode = Binary; final = true; _ } as h),
       Some ({ final = false; _ } as h') )
   | ( Header ({ opcode = Nonctrl _; final = true; _ } as h),
       Some ({ final = false; _ } as h') ) ->
-      Format.kasprintf
-        (fun msg -> `Fail msg)
-        "unfinished continuation: %a@.%a" Header.pp h Header.pp h'
+      Format.kasprintf Or_error.error_string "unfinished continuation: %a@.%a"
+        Header.pp h Header.pp h'
   | Header { opcode = Continuation; length; _ }, _ ->
       st.to_read <- length;
-      `Continue
+      Ok `Continue
   | Header ({ length = 0; final = true; _ } as h), _ ->
       st.header <- None;
-      `Frame { Frame.header = h; payload }
+      Ok (`Frame { Frame.header = h; payload })
   | Header h, _ ->
       st.header <- Some h;
       st.to_read <- h.length;
-      `Continue
+      Ok `Continue
   | Payload _, None ->
       Log.err (fun m -> m "Got %a" Sexplib.Sexp.pp (sexp_of_t t));
-      `Fail "payload without a header"
+      Format.kasprintf Or_error.error_string "payload without a header"
   | Payload b, Some h -> (
       let buflen = Bigstring.length b in
       match h.final && buflen = st.to_read with
@@ -60,11 +61,11 @@ let reassemble st t =
           Bigbuffer.add_bigstring st.buf b;
           st.header <- None;
           let payload = Bigbuffer.big_contents st.buf in
-          `Frame { Frame.header = h; payload }
+          Ok (`Frame { Frame.header = h; payload })
       | false ->
           Bigbuffer.add_bigstring st.buf b;
           st.to_read <- st.to_read - buflen;
-          `Continue )
+          Ok `Continue )
 
 let r3_of_r2 of_frame st r2 w2 ({ Frame.header; payload } as frame) =
   Log_async.debug (fun m -> m "<- %a" Frame.pp frame) >>= fun () ->
@@ -135,9 +136,20 @@ let mk_r3 of_frame st r2 w2 =
           let ret = Queue.create () in
           Deferred.Queue.iter q ~f:(fun t ->
               match reassemble st t with
-              | `Fail msg -> failwith msg
-              | `Continue -> Deferred.unit
-              | `Frame fr -> (
+              | Error msg ->
+                  let fr =
+                    Frame.String.close
+                      ~status:
+                        ( Status.ProtocolError,
+                          Some ("\000\000" ^ Error.to_string_hum msg) )
+                      ()
+                  in
+                  Pipe.write w2 (Header fr.header) >>= fun () ->
+                  Pipe.write w2 (Payload fr.payload) >>= fun () ->
+                  Pipe.close to_r3;
+                  Deferred.unit
+              | Ok `Continue -> Deferred.unit
+              | Ok (`Frame fr) -> (
                   r3_of_r2 of_frame st r2 w2 fr >>= function
                   | None -> Deferred.unit
                   | Some v ->
