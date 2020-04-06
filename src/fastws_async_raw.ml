@@ -31,6 +31,12 @@ let write_frame w { Frame.header; payload } =
   | None -> Deferred.unit
   | Some payload -> Pipe.write w (Payload payload)
 
+let write_frame_if_open w { Frame.header; payload } =
+  Pipe.write_if_open w (Header header) >>= fun () ->
+  match payload with
+  | None -> Deferred.unit
+  | Some payload -> Pipe.write_if_open w (Payload payload)
+
 let merge_headers h1 h2 =
   Headers.fold ~init:h2 ~f:(fun k v a -> Headers.add_unless_exists a k v) h1
 
@@ -84,39 +90,43 @@ let rec read_response conn r =
 let flush stream w =
   Faraday_async.serialize stream
     ~yield:(fun _ -> Scheduler.yield ())
-    ~writev:(fun iovecs -> return (write_iovecs w iovecs))
+    ~writev:(fun iov -> return (write_iovecs w iov))
 
-let mk_client_write ~monitor w =
-  let rec inner r hdr =
-    Pipe.read r >>= function
-    | `Eof -> Deferred.unit
-    | `Ok (Header t) ->
-        let serializer = Faraday.create 6 in
-        let mask = Crypto.(to_string (generate 4)) in
-        let h = { t with mask = Some mask } in
-        Header.serialize serializer h;
-        Faraday.close serializer;
-        flush serializer w >>= fun () ->
-        Log_async.debug (fun m -> m "-> %a" Header.pp t) >>= fun () ->
-        inner r (Some h)
-    | `Ok (Payload buf) -> (
-        match hdr with
-        | Some { mask = Some mask; _ } ->
-            let serializer = Faraday.create (Bigstring.length buf + 6) in
-            Header.xormask ~mask buf;
-            Faraday.write_bigstring serializer buf;
-            Faraday.close serializer;
-            Header.xormask ~mask buf;
-            let buf_str =
-              Bigstring.(to_string buf ~pos:0 ~len:(min 1024 (length buf)))
-            in
-            Log_async.debug (fun m -> m "-> %s" buf_str) >>= fun () ->
-            flush serializer w >>= fun () -> inner r hdr
-        | _ -> failwith "current header must exist" )
-  in
+let foldf w (a : Fastws.Header.t option) = function
+  | Header t ->
+      let serializer = Faraday.create 6 in
+      let mask = Crypto.(to_string (generate 4)) in
+      let h = { t with mask = Some mask } in
+      Header.serialize serializer h;
+      Faraday.close serializer;
+      flush serializer w >>= fun () ->
+      Log_async.debug (fun m -> m "-> %a" Header.pp t) >>| fun () -> Some h
+  | Payload buf -> (
+      match a with
+      | Some { mask = Some mask; _ } ->
+          let serializer = Faraday.create (Bigstring.length buf + 6) in
+          Header.xormask ~mask buf;
+          Faraday.write_bigstring serializer buf;
+          Faraday.close serializer;
+          Header.xormask ~mask buf;
+          Log_async.debug (fun m ->
+              m "-> %s"
+                Bigstring.(to_string buf ~pos:0 ~len:(min 4096 (length buf))))
+          >>= fun () ->
+          flush serializer w >>| fun () -> None
+      | _ -> failwith "current header must exist" )
+
+let mk_w2 ~monitor:_ w =
   Pipe.create_writer (fun r ->
-      Scheduler.within' ~monitor (fun () ->
-          if Writer.is_closed w then Deferred.unit else inner r None))
+      let downstream_flushed () =
+        match Pipe.is_closed r with
+        | true -> return `Reader_closed (* Not sure if this is correct. *)
+        | false -> Writer.flushed w >>| fun () -> `Ok
+      in
+      let consumer = Pipe.add_consumer r ~downstream_flushed in
+      Pipe.fold' ~flushed:(Consumer consumer) r ~init:None ~f:(fun init q ->
+          Deferred.Queue.fold q ~init ~f:(foldf w))
+      |> Deferred.ignore_m)
 
 type st = { h : Header.t; payload : Bigstring.t; mutable pos : int }
 
@@ -166,23 +176,34 @@ let handle_chunk w =
               read_payload buf ~pos ~len ) )
   in
   fun buf ~pos ~len ->
+    (* Log_async.debug (fun m -> m "handle_chunk") >>= fun () -> *)
     consumed := 0;
     match !current_header with
     | None -> read_header buf ~pos ~len
     | Some _ -> read_payload buf ~pos ~len
 
-let mk_client_read ~monitor r =
-  Pipe.create_reader ~close_on_exception:false (fun w ->
+let mk_r2 ~monitor r =
+  Pipe.create_reader ~close_on_exception:false (fun to_r2 ->
       Scheduler.within' ~monitor (fun () ->
-          let handle_chunk = handle_chunk w in
-          Reader.read_one_chunk_at_a_time r ~handle_chunk >>| fun _ ->
-          Pipe.close w))
+          let handle_chunk = handle_chunk to_r2 in
+          Monitor.protect
+            (fun () -> Reader.read_one_chunk_at_a_time r ~handle_chunk)
+            ~finally:(fun () ->
+              Log_async.debug (fun m ->
+                  m "Fastws_async_raw.mk_client_read: finally")
+              >>= fun () ->
+              Pipe.close to_r2;
+              Reader.close r)
+          |> Deferred.ignore_m))
 
 let initialize ?timeout ?(extra_headers = Headers.empty) url r w =
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
-    Option.value_map (Uri.host url) ~default:Headers.empty
-      ~f:(Headers.add extra_headers "Host")
+    match (Uri.host url, Uri.port url) with
+    | Some h, Some p ->
+        Headers.add extra_headers "Host" (h ^ ":" ^ Int.to_string p)
+    | Some h, None -> Headers.add extra_headers "Host" h
+    | _ -> extra_headers
   in
   let headers = merge_headers headers (Fastws.headers nonce) in
   let req = Request.create ~headers `GET (Uri.path_and_query url) in
@@ -218,13 +239,12 @@ let connect ?version ?options ?socket ?(crypto = (module Crypto : CRYPTO))
   >>= fun { r; w; _ } ->
   initialize ?timeout ?extra_headers url r w >>| fun _resp ->
   let monitor = Monitor.create () in
-  let client_read = mk_client_read ~monitor r in
-  let client_write = mk_client_write ~monitor w in
+  let r2 = mk_r2 ~monitor r in
+  let w2 = mk_w2 ~monitor w in
+  (* don't_wait_for
+   *   ( Reader.close_finished r >>= fun () ->
+   *     Log_async.debug (fun m -> m "reader closed") ); *)
   let log_exn exn = Log.err (fun m -> m "%a" Exn.pp exn) in
   Monitor.detach_and_iter_errors monitor ~f:log_exn;
   Monitor.detach_and_iter_errors (Writer.monitor w) ~f:log_exn;
-  don't_wait_for
-    ( Deferred.all_unit Pipe.[ closed client_read; closed client_write ]
-    >>= fun () ->
-      Writer.close w >>= fun () -> Reader.close r );
-  (client_read, client_write)
+  (r2, w2)

@@ -1,10 +1,10 @@
 opam-version: "2.0"
 authors: "Vincent Bernardoff <vb@luminar.eu.org>"
 maintainer: "Vincent Bernardoff <vb@luminar.eu.org>"
-homepage: "https://github.com/vbmithr/ocaml-fastws"
-bug-reports: "https://github.com/vbmithr/ocaml-fastws/issues"
-dev-repo: "git+https://github.com/vbmithr/ocaml-fastws"
-doc: "https://vbmithr.github.io/ocaml-fastws/doc"
+homepage: "https://github.com/deepmarker/ocaml-fastws"
+bug-reports: "https://github.com/deepmarker/ocaml-fastws/issues"
+dev-repo: "git+https://github.com/deepmarker/ocaml-fastws"
+doc: "https://deepmarker.github.io/ocaml-fastws/doc"
 build: [ "dune" "build" "-j" jobs "-p" name ]
 # run-test: [ "dune" "runtest" "-j" jobs "-p" name ]
 depends: [
@@ -22,9 +22,9 @@ depends: [
   "alcotest-async" {with-test & >= "1.0.1"}
 ]
 pin-depends: [
-  ["fastws.dev" "git+https://github.com/vbmithr/ocaml-fastws.git"]
-  ["async-uri.dev" "git+https://github.com/vbmithr/async-uri.git"]
-  ["logs-async.dev" "git+https://github.com/vbmithr/logs-async.git"]
+  ["fastws.dev" "git+https://github.com/deepmarker/ocaml-fastws.git"]
+  ["async-uri.dev" "git+https://github.com/deepmarker/async-uri.git"]
+  ["logs-async.dev" "git+https://github.com/deepmarker/logs-async.git"]
 ]
 synopsis: "Fast websocket library"
 description: """

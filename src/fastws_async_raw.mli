@@ -13,6 +13,8 @@ val is_header : t -> bool
 
 val write_frame : t Pipe.Writer.t -> Frame.t -> unit Deferred.t
 
+val write_frame_if_open : t Pipe.Writer.t -> Frame.t -> unit Deferred.t
+
 val connect :
   ?version:Async_ssl.Version.t ->
   ?options:Async_ssl.Opt.t list ->

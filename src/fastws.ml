@@ -29,8 +29,7 @@ module Crypto = struct
   let of_string t = t
 
   let generate ?(g = Random.get_state ()) len =
-    Bytes.init len (fun _ -> Char.chr (Random.State.bits g land 0xFF))
-    |> Bytes.unsafe_to_string
+    String.init len (fun _ -> Char.chr @@ Random.State.int g 256)
 
   include Sha1
 end
@@ -38,17 +37,17 @@ end
 let websocket_uuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 let headers ?protocols nonce =
-  Httpaf.Headers.of_list
-  @@ ("Upgrade", "websocket") :: ("Connection", "Upgrade")
-     :: ("Sec-WebSocket-Key", nonce)
-     ::
-     ( match protocols with
-     | None -> [ ("Sec-WebSocket-Version", "13") ]
-     | Some ps ->
-         [
-           ("Sec-WebSocket-Version", String.concat ", " ps);
-           ("Sec-WebSocket-Version", "13");
-         ] )
+  ( [
+      ("Upgrade", "websocket");
+      ("Connection", "Upgrade");
+      ("Sec-WebSocket-Key", nonce);
+      ("Sec-WebSocket-Version", "13");
+    ]
+  @
+  match protocols with
+  | None -> []
+  | Some ps -> [ ("Sec-WebSocket-Protocol", String.concat ", " ps) ] )
+  |> Httpaf.Headers.of_list
 
 module Status = struct
   type t =
@@ -86,6 +85,13 @@ module Status = struct
     | UnsupportedExtension -> 1010
     | UnexpectedCondition -> 1011
     | Unknown status -> status
+
+  let to_bytes t =
+    let buf = Bigstringaf.create 2 in
+    Bigstringaf.set_int16_be buf 0 (to_int t);
+    buf
+
+  let blit buf i t = Bigstringaf.set_int16_be buf i (to_int t)
 end
 
 module Opcode = struct
@@ -226,6 +232,11 @@ end
 module Frame = struct
   type t = { header : Header.t; payload : Bigstringaf.t option }
 
+  let create ?rsv ?final ?mask ?payload opcode =
+    let length = Option.fold ~none:0 ~some:Bigstringaf.length payload in
+    let header = Header.create ?rsv ?final ?mask ~length opcode in
+    { header; payload }
+
   let compare a b =
     match (a, b) with
     | { header; payload = None }, { header = header'; payload = None } ->
@@ -256,45 +267,6 @@ module Frame = struct
           Bigstringaf.(
             substring payload ~off:0 ~len:(min 1024 (length payload)))
 
-  let kcreate opcode content =
-    match String.length content with
-    | 0 -> { header = Header.create opcode; payload = None }
-    | len ->
-        let content = Bigstringaf.of_string ~off:0 ~len content in
-        {
-          header = Header.create ~length:(Bigstringaf.length content) opcode;
-          payload = Some content;
-        }
-
-  let text msg = kcreate Text msg
-
-  let binary msg = kcreate Binary msg
-
-  let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
-
-  let pingf fmt = Format.kasprintf (kcreate Ping) fmt
-
-  let pongf fmt = Format.kasprintf (kcreate Pong) fmt
-
-  let textf fmt = Format.kasprintf (kcreate Text) fmt
-
-  let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
-
-  let kclose status msg =
-    let msglen = String.length msg in
-    let content = Bigstringaf.create (2 + msglen) in
-    Bigstringaf.set_int16_be content 0 (Status.to_int status);
-    Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen;
-    {
-      header = Header.create ~length:(2 + msglen) Close;
-      payload = Some content;
-    }
-
-  let close ?(status = Status.NormalClosure) msg = kclose status msg
-
-  let closef ?(status = Status.NormalClosure) fmt =
-    Format.kasprintf (kclose status) fmt
-
   let is_binary = function
     | { header = { opcode = Binary; _ }; _ } -> true
     | _ -> false
@@ -306,4 +278,68 @@ module Frame = struct
   let is_close = function
     | { header = { opcode = Close; _ }; _ } -> true
     | _ -> false
+
+  module String = struct
+    let kcreate opcode content =
+      match String.length content with
+      | 0 -> { header = Header.create opcode; payload = None }
+      | len ->
+          let content = Bigstringaf.of_string ~off:0 ~len content in
+          { header = Header.create ~length:len opcode; payload = Some content }
+
+    let text msg = kcreate Text msg
+
+    let binary msg = kcreate Binary msg
+
+    let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
+
+    let pingf fmt = Format.kasprintf (kcreate Ping) fmt
+
+    let pongf fmt = Format.kasprintf (kcreate Pong) fmt
+
+    let textf fmt = Format.kasprintf (kcreate Text) fmt
+
+    let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
+
+    let kclose status msg =
+      let msglen = String.length msg in
+      let content = Bigstringaf.create (2 + msglen) in
+      Bigstringaf.set_int16_be content 0 (Status.to_int status);
+      Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen;
+      {
+        header = Header.create ~length:(2 + msglen) Close;
+        payload = Some content;
+      }
+
+    let close ?status () =
+      match status with
+      | None -> create Close
+      | Some (st, None) ->
+          let payload = Status.to_bytes st in
+          create ~payload Close
+      | Some (st, Some payload) ->
+          let len = String.length payload in
+          let payload = Bigstringaf.of_string ~off:0 ~len payload in
+          Status.blit payload 0 st;
+          create ~payload Close
+
+    let closef ?(status = Status.NormalClosure) fmt =
+      Format.kasprintf (kclose status) fmt
+  end
+
+  module Bigstring = struct
+    let text payload = create Text ~payload
+
+    let binary payload = create Binary ~payload
+
+    let close ?status () =
+      match status with
+      | None -> create Close
+      | Some (st, None) ->
+          let payload = Status.to_bytes st in
+          create ~payload Close
+      | Some (st, Some payload) ->
+          Status.blit payload 0 st;
+          create ~payload Close
+  end
 end

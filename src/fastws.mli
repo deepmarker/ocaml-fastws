@@ -105,27 +105,38 @@ module Frame : sig
 
   val pp : Format.formatter -> t -> unit
 
-  val text : string -> t
-
-  val binary : string -> t
-
-  val close : ?status:Status.t -> string -> t
-
   val is_text : t -> bool
 
   val is_binary : t -> bool
 
   val is_close : t -> bool
 
-  val createf : Opcode.t -> ('a, Format.formatter, unit, t) format4 -> 'a
+  module String : sig
+    val text : string -> t
 
-  val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
+    val binary : string -> t
 
-  val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
+    val createf : Opcode.t -> ('a, Format.formatter, unit, t) format4 -> 'a
 
-  val textf : ('a, Format.formatter, unit, t) format4 -> 'a
+    val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
 
-  val binaryf : ('a, Format.formatter, unit, t) format4 -> 'a
+    val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
 
-  val closef : ?status:Status.t -> ('a, Format.formatter, unit, t) format4 -> 'a
+    val textf : ('a, Format.formatter, unit, t) format4 -> 'a
+
+    val binaryf : ('a, Format.formatter, unit, t) format4 -> 'a
+
+    val close : ?status:Status.t * string option -> unit -> t
+
+    val closef :
+      ?status:Status.t -> ('a, Format.formatter, unit, t) format4 -> 'a
+  end
+
+  module Bigstring : sig
+    val text : Bigstringaf.t -> t
+
+    val binary : Bigstringaf.t -> t
+
+    val close : ?status:Status.t * Bigstringaf.t option -> unit -> t
+  end
 end

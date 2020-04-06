@@ -11,11 +11,11 @@ let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 let frame = testable Frame.pp Frame.equal
 
 let connect_f mv w =
-  let msg = Frame.text "msg" in
+  let msg = Frame.String.text "msg" in
   write_frame w msg >>= fun () ->
   Mvar.take mv >>= fun header ->
   Mvar.take mv >>= fun payload ->
-  write_frame w (Frame.close "") >>= fun () ->
+  write_frame w (Frame.Bigstring.close ()) >>= fun () ->
   Mvar.take mv >>| fun _cl ->
   match (header, payload) with
   | Header header, Payload payload ->
@@ -34,26 +34,33 @@ let connect () =
   Deferred.all_unit
     [ connect_f mv w; Pipe.iter r ~f:(handle_incoming_frame mv) ]
 
+let of_payload = Option.map ~f:Bigstring.to_string
+
+let to_payload = function
+  | None -> Bigstring.create 0
+  | Some msg -> Bigstring.of_string msg
+
+let msg = "msg"
+
 let connect_ez () =
-  Fastws_async.connect ~of_string:Fn.id ~to_string:Fn.id url
-  >>= fun { r; w; _ } ->
-  let msg = "msg" in
-  Pipe.write w msg >>= fun () ->
+  Fastws_async.connect ~of_payload ~to_payload url >>= fun { r; w; _ } ->
+  Pipe.write w (Some msg) >>= fun () ->
   Pipe.read r >>= fun res ->
   Pipe.close w;
   Pipe.close_read r;
   Deferred.all_unit [ Pipe.closed w; Pipe.closed r ] >>| fun () ->
   match res with
   | `Eof -> failwith "did not receive echo"
-  | `Ok msg' -> check string "" msg msg'
+  | `Ok None -> failwith "got empty string"
+  | `Ok (Some msg') -> check string "" msg msg'
 
 let with_connection_ez () =
-  let msg = "msg" in
-  Fastws_async.with_connection ~of_string:Fn.id ~to_string:Fn.id url (fun r w ->
-      Pipe.write w msg >>= fun () ->
+  Fastws_async.with_connection ~of_payload ~to_payload url (fun r w ->
+      Pipe.write w (Some msg) >>= fun () ->
       Pipe.read r >>| function
       | `Eof -> failwith "did not receive echo"
-      | `Ok msg' -> check string "" msg msg')
+      | `Ok None -> failwith "got empty string"
+      | `Ok (Some msg') -> check string "" msg msg')
 
 let async =
   [

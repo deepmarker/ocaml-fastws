@@ -11,8 +11,8 @@ val connect :
   ?binary:bool ->
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
-  of_string:(string -> 'r) ->
-  to_string:('w -> string) ->
+  of_payload:(Bigstring.t option -> 'r) ->
+  to_payload:('w -> Bigstring.t) ->
   Uri.t ->
   ('r, 'w) t Deferred.t
 
@@ -22,8 +22,8 @@ val with_connection :
   ?binary:bool ->
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
-  of_string:(string -> 'r) ->
-  to_string:('w -> string) ->
+  of_payload:(Bigstring.t option -> 'r) ->
+  to_payload:('w -> Bigstring.t) ->
   Uri.t ->
   ('r Pipe.Reader.t -> 'w Pipe.Writer.t -> 'a Deferred.t) ->
   'a Deferred.t

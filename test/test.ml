@@ -2,7 +2,7 @@ open Fastws
 open Alcotest
 
 let frames =
-  let open Frame in
+  let open Frame.String in
   [
     ("empty text", textf "");
     ("text with content", textf "test");
@@ -25,7 +25,7 @@ let frames =
   ]
 
 let multiframes =
-  let open Frame in
+  let open Frame.String in
   [
     ("double text", [ textf ""; textf "" ]);
     ("text close", [ textf ""; closef "" ]);

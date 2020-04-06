@@ -1,1 +1,1 @@
-# fastws [![Build Status](https://travis-ci.org/vbmithr/ocaml-fastws.svg?branch=master)](https://travis-ci.org/vbmithr/ocaml-fastws)
+# ocaml-fastws [![Build Status](https://api.travis-ci.com/deepmarker/ocaml-fastws.svg?branch=master)](https://travis-ci.com/github/deepmarker/ocaml-fastws)

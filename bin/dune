@@ -1,7 +1,6 @@
 (executables
- (names leak wscat)
- (public_names leak-test wscat)
- (modules leak wscat)
+ (names leak wscat wstest)
+ (public_names leak-test wscat wstest)
  (preprocess (pps ppx_jane))
  (package fastws-async-bin)
  (libraries logs-async-reporter fastws-async))

@@ -1,10 +1,10 @@
 opam-version: "2.0"
 authors: "Vincent Bernardoff <vb@luminar.eu.org>"
 maintainer: "Vincent Bernardoff <vb@luminar.eu.org>"
-homepage: "https://github.com/vbmithr/ocaml-fastws"
-bug-reports: "https://github.com/vbmithr/ocaml-fastws/issues"
-dev-repo: "git+https://github.com/vbmithr/ocaml-fastws"
-doc: "https://vbmithr.github.io/ocaml-fastws/doc"
+homepage: "https://github.com/deepmarker/ocaml-fastws"
+bug-reports: "https://github.com/deepmarker/ocaml-fastws/issues"
+dev-repo: "git+https://github.com/deepmarker/ocaml-fastws"
+doc: "https://deepmarker.github.io/ocaml-fastws/doc"
 build: [ "dune" "build" "-j" jobs "-p" name ]
 run-test: [ "dune" "runtest" "-j" jobs "-p" name ]
 depends: [

@@ -66,11 +66,23 @@ let reassemble st t =
           st.to_read <- st.to_read - buflen;
           `Continue )
 
-let process rd st client_w r w ({ Frame.header; payload } as frame) =
+let r3_of_r2 of_payload st to_r3 r2 w2 ({ Frame.header; payload } as frame) =
   Log_async.debug (fun m -> m "<- %a" Frame.pp frame) >>= fun () ->
   match header.opcode with
-  | Ping -> write_frame w { header = { header with opcode = Pong }; payload }
-  | Close -> write_frame w frame >>| fun () -> Pipe.close_read r
+  | Ping -> write_frame w2 { header = { header with opcode = Pong }; payload }
+  | Close ->
+      let code =
+        Option.bind payload ~f:(fun payload ->
+            if Bigstringaf.length payload > 1 then
+              Some (Bigstringaf.get_int16_be payload 0)
+            else None)
+      in
+      Option.iter code ~f:(fun code ->
+          Log.debug (fun m ->
+              m "Remote endpoint closed connection with code %d" code));
+      write_frame_if_open w2 frame >>| fun () -> Pipe.close_read r2
+      (* Pipe.close w2;
+       * Pipe.close to_r3 *)
   | Pong -> (
       match payload with
       | None ->
@@ -87,86 +99,91 @@ let process rd st client_w r w ({ Frame.header; payload } as frame) =
             Deferred.unit
           with _ ->
             Log_async.info (fun m -> m "got unsollicited pong with payload") ) )
-  | Text | Binary -> (
-      match payload with
-      | None -> Deferred.unit
-      | Some payload ->
-          assert (Bigstring.length payload = header.length);
-          let payload = Bigstring.to_string payload in
-          Pipe.write client_w (rd payload) )
+  | Text | Binary ->
+      Option.iter payload ~f:(fun payload ->
+          assert (Bigstring.length payload = header.length));
+      Pipe.write to_r3 (of_payload payload)
   | Continuation -> assert false
   | Ctrl _ | Nonctrl _ ->
-      write_frame w (Frame.close ~status:Status.UnsupportedExtension "")
+      write_frame w2
+        (Frame.Bigstring.close ~status:(Status.UnsupportedExtension, None) ())
       >>| fun () ->
-      Pipe.close w;
-      Pipe.close_read r
+      Pipe.close w2;
+      Pipe.close_read r2;
+      Pipe.close to_r3
 
 let heartbeat w span =
   let terminated = Ivar.create () in
   let stop = Deferred.any [ Pipe.closed w; Ivar.read terminated ] in
   let write_ping () =
     Log_async.debug (fun m -> m "-> PING") >>= fun () ->
-    let ping = Frame.pingf "%a" Time_ns.pp (Time_ns.now ()) in
+    let ping = Frame.String.pingf "%a" Time_ns.pp (Time_ns.now ()) in
     Fastws_async_raw.write_frame w ping
   in
   Clock_ns.after span >>> fun () ->
   Clock_ns.run_at_intervals' ~continue_on_error:false ~stop span write_ping
 
-let mk_client_read rd st ws_write r =
-  Pipe.create_reader ~close_on_exception:false (fun client_w ->
-      Pipe.iter r ~f:(fun t ->
+let mk_r3 of_payload st r2 w2 =
+  Pipe.create_reader ~close_on_exception:false (fun to_r3 ->
+      Pipe.iter r2 ~f:(fun t ->
           match reassemble st t with
           | `Fail msg -> failwith msg
           | `Continue -> Deferred.unit
           | `Frame fr ->
               Scheduler.within' ~monitor:st.monitor (fun () ->
-                  process rd st client_w r ws_write fr)))
+                  r3_of_r2 of_payload st to_r3 r2 w2 fr)))
 
-let mk_client_write wr st w =
-  Pipe.create_writer (fun ws_read ->
-      Pipe.iter ws_read ~f:(fun m ->
-          let { Frame.header; payload } =
-            match st.binary with
-            | true -> Frame.binary (wr m)
-            | false -> Frame.text (wr m)
-          in
-          Scheduler.within' ~monitor:st.monitor (fun () ->
-              Pipe.write w (Header header) >>= fun () ->
-              match payload with
-              | None -> Deferred.unit
-              | Some payload -> Pipe.write w (Payload payload))))
+let mk_w3 to_payload st w2 =
+  Pipe.create_writer (fun from_w3 ->
+      Pipe.transfer' from_w3 w2 ~f:(fun pls ->
+          let res = Queue.create () in
+          Queue.iter pls ~f:(fun pl ->
+              let { Frame.header; payload } =
+                match st.binary with
+                | true -> Frame.Bigstring.binary (to_payload pl)
+                | false -> Frame.Bigstring.text (to_payload pl)
+              in
+              Queue.enqueue res (Header header);
+              Option.iter payload ~f:(fun payload ->
+                  Queue.enqueue res (Payload payload)));
+          return res))
 
 type ('r, 'w) t = { r : 'r Pipe.Reader.t; w : 'w Pipe.Writer.t }
 
 let create r w = { r; w }
 
-let connect ?on_pong ?crypto ?(binary = false) ?extra_headers ?hb ~of_string
-    ~to_string url =
-  connect ?crypto ?extra_headers url >>= fun (r, w) ->
+let connect ?on_pong ?crypto ?(binary = false) ?extra_headers ?hb ~of_payload
+    ~to_payload url =
+  connect ?crypto ?extra_headers url >>= fun (r2, w2) ->
   let st = create_st ?on_pong binary in
   Monitor.detach_and_iter_errors st.monitor ~f:(fun exn ->
       Log.err (fun m -> m "%a" Exn.pp exn);
-      Pipe.close_read r;
-      Pipe.close w);
+      Pipe.close_read r2;
+      Pipe.close w2);
   Option.iter hb ~f:(fun span ->
-      Scheduler.within ~monitor:st.monitor (fun () -> heartbeat w span));
-  let client_read = mk_client_read of_string st w r in
-  let client_write = mk_client_write to_string st w in
-  (Pipe.closed client_read >>> fun () -> Pipe.close_read r);
-  ( Deferred.all_unit [ Pipe.closed client_write; Pipe.closed client_read ]
-  >>> fun () -> Pipe.close w );
-  return (create client_read client_write)
+      Scheduler.within ~monitor:st.monitor (fun () -> heartbeat w2 span));
+  let r3 = mk_r3 of_payload st r2 w2 in
+  let w3 = mk_w3 to_payload st w2 in
+  (Pipe.closed r3 >>> fun () -> Pipe.close_read r2);
+  ( Deferred.all_unit [ Pipe.closed w3; Pipe.closed r3 ] >>> fun () ->
+    Pipe.close w2 );
+  return (create r3 w3)
 
-let with_connection ?on_pong ?crypto ?binary ?extra_headers ?hb ~of_string
-    ~to_string uri f =
-  connect ?on_pong ?binary ?extra_headers ?hb ?crypto ~of_string ~to_string uri
-  >>= fun { r; w } ->
+let with_connection ?on_pong ?crypto ?binary ?extra_headers ?hb ~of_payload
+    ~to_payload uri f =
+  connect ?on_pong ?binary ?extra_headers ?hb ?crypto ~of_payload ~to_payload
+    uri
+  >>= fun { r = r3; w = w3 } ->
   Monitor.protect
-    (fun () -> f r w)
+    (fun () -> f r3 w3)
     ~finally:(fun () ->
-      Pipe.close_read r;
-      Pipe.close w;
-      Deferred.unit)
+      Pipe.close_read r3;
+      Pipe.close w3;
+      Deferred.all_unit
+        [
+          Deferred.ignore_m (Pipe.upstream_flushed r3);
+          Deferred.ignore_m (Pipe.upstream_flushed w3);
+        ])
 
 module type RW = sig
   type r
