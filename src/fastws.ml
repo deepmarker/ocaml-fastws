@@ -230,42 +230,25 @@ module Header = struct
 end
 
 module Frame = struct
-  type t = { header : Header.t; payload : Bigstringaf.t option }
+  type t = { header : Header.t; payload : Bigstringaf.t }
 
-  let create ?rsv ?final ?mask ?payload opcode =
-    let length = Option.fold ~none:0 ~some:Bigstringaf.length payload in
+  let create ?rsv ?final ?mask ?(payload = Bigstringaf.create 0) opcode =
+    let length = Bigstringaf.length payload in
     let header = Header.create ?rsv ?final ?mask ~length opcode in
     { header; payload }
 
-  let compare a b =
-    match (a, b) with
-    | { header; payload = None }, { header = header'; payload = None } ->
-        Header.compare header header'
-    | { payload = Some _; _ }, { payload = None; _ } -> 1
-    | { payload = None; _ }, { payload = Some _; _ } -> -1
-    | { header; payload = Some p }, { header = header'; payload = Some p' } -> (
-        let lenp = Bigstringaf.length p in
-        let lenp' = Bigstringaf.length p' in
-        match Int.compare lenp lenp' with
-        | 0 -> (
-            match Bigstringaf.unsafe_memcmp p 0 p' 0 lenp with
-            | 0 -> Header.compare header header'
-            | n -> n )
-        | n -> n )
+  let compare = Stdlib.compare
 
-  let equal a b = compare a b = 0
+  let equal = Stdlib.( = )
 
   let pp ppf = function
-    | { header; payload = None } ->
-        Format.fprintf ppf "%a" Sexplib.Sexp.pp (Header.sexp_of_t header)
-    | { header = { opcode = Text; _ } as header; payload = Some payload } ->
+    | { header = { opcode = Text; _ } as header; payload } ->
         Format.fprintf ppf "%a [%s]" Sexplib.Sexp.pp (Header.sexp_of_t header)
           Bigstringaf.(
             substring payload ~off:0 ~len:(min 1024 (length payload)))
-    | { header; payload = Some payload } ->
-        Format.fprintf ppf "%a [%S]" Sexplib.Sexp.pp (Header.sexp_of_t header)
-          Bigstringaf.(
-            substring payload ~off:0 ~len:(min 1024 (length payload)))
+    | { header; _ } ->
+        Format.fprintf ppf "%a <binary data>" Sexplib.Sexp.pp
+          (Header.sexp_of_t header)
 
   let is_binary = function
     | { header = { opcode = Binary; _ }; _ } -> true
@@ -307,13 +290,10 @@ module Frame = struct
 
     let kclose status msg =
       let msglen = String.length msg in
-      let content = Bigstringaf.create (2 + msglen) in
-      Bigstringaf.set_int16_be content 0 (Status.to_int status);
-      Bigstringaf.blit_from_string msg ~src_off:0 content ~dst_off:2 ~len:msglen;
-      {
-        header = Header.create ~length:(2 + msglen) Close;
-        payload = Some content;
-      }
+      let payload = Bigstringaf.create (2 + msglen) in
+      Bigstringaf.set_int16_be payload 0 (Status.to_int status);
+      Bigstringaf.blit_from_string msg ~src_off:0 payload ~dst_off:2 ~len:msglen;
+      { header = Header.create ~length:(2 + msglen) Close; payload }
 
     let close ?status () =
       match status with

@@ -9,21 +9,21 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
+let payload = Bigstring.create 0
+
 type st = {
   buf : Bigbuffer.t;
   monitor : Monitor.t;
-  binary : bool;
   mutable header : Header.t option;
   mutable to_read : int;
   on_pong : Time_ns.Span.t option -> unit;
 }
 
-let create_st ?(on_pong = Fn.ignore) binary =
+let create_st ?(on_pong = Fn.ignore) () =
   {
     buf = Bigbuffer.create 13;
     monitor = Monitor.create ();
     header = None;
-    binary;
     to_read = 0;
     on_pong;
   }
@@ -45,7 +45,7 @@ let reassemble st t =
       `Continue
   | Header ({ length = 0; final = true; _ } as h), _ ->
       st.header <- None;
-      `Frame { Frame.header = h; payload = None }
+      `Frame { Frame.header = h; payload }
   | Header h, _ ->
       st.header <- Some h;
       st.to_read <- h.length;
@@ -60,7 +60,7 @@ let reassemble st t =
           Bigbuffer.add_bigstring st.buf b;
           st.header <- None;
           let payload = Bigbuffer.big_contents st.buf in
-          `Frame { Frame.header = h; payload = Some payload }
+          `Frame { Frame.header = h; payload }
       | false ->
           Bigbuffer.add_bigstring st.buf b;
           st.to_read <- st.to_read - buflen;
@@ -70,14 +70,17 @@ let r3_of_r2 of_frame st r2 w2 ({ Frame.header; payload } as frame) =
   Log_async.debug (fun m -> m "<- %a" Frame.pp frame) >>= fun () ->
   match header.opcode with
   | Ping ->
-      write_frame w2 { header = { header with opcode = Pong }; payload }
-      >>| fun () -> None
+      if Bigstring.length payload < 126 then
+        write_frame w2 { header = { header with opcode = Pong }; payload }
+        >>| fun () -> None
+      else (
+        Pipe.close_read r2;
+        return None )
   | Close ->
       let code =
-        Option.bind payload ~f:(fun payload ->
-            if Bigstringaf.length payload > 1 then
-              Some (Bigstringaf.get_int16_be payload 0)
-            else None)
+        match Bigstringaf.length payload with
+        | 0 | 1 -> None
+        | _ -> Some (Bigstringaf.get_int16_be payload 0)
       in
       Option.iter code ~f:(fun code ->
           Log.debug (fun m ->
@@ -85,15 +88,13 @@ let r3_of_r2 of_frame st r2 w2 ({ Frame.header; payload } as frame) =
       write_frame_if_open w2 frame >>| fun () ->
       Pipe.close_read r2;
       None
-      (* Pipe.close w2;
-       * Pipe.close to_r3 *)
   | Pong -> (
-      match payload with
-      | None ->
+      match Bigstringaf.length payload with
+      | 0 ->
           st.on_pong None;
           Log_async.info (fun m -> m "got unsollicited pong with no payload")
           >>| fun () -> None
-      | Some payload -> (
+      | _ -> (
           Log_async.info (fun m -> m "got unsollicited pong with payload")
           >>= fun () ->
           try
@@ -106,8 +107,7 @@ let r3_of_r2 of_frame st r2 w2 ({ Frame.header; payload } as frame) =
             return None
           with _ -> return None ) )
   | Text | Binary ->
-      Option.iter payload ~f:(fun payload ->
-          assert (Bigstring.length payload = header.length));
+      assert (Bigstring.length payload = header.length);
       return (Some (of_frame frame))
   | Continuation -> assert false
   | Ctrl _ | Nonctrl _ ->
@@ -152,18 +152,18 @@ let mk_w3 to_frame w2 =
           Queue.iter pls ~f:(fun pl ->
               let { Frame.header; payload } = to_frame pl in
               Queue.enqueue res (Header header);
-              Option.iter payload ~f:(fun payload ->
-                  Queue.enqueue res (Payload payload)));
+              match Bigstring.length payload with
+              | 0 -> ()
+              | _ -> Queue.enqueue res (Payload payload));
           return res))
 
 type ('r, 'w) t = { r : 'r Pipe.Reader.t; w : 'w Pipe.Writer.t }
 
 let create r w = { r; w }
 
-let connect ?on_pong ?crypto ?(binary = false) ?extra_headers ?hb ~of_frame
-    ~to_frame url =
+let connect ?on_pong ?crypto ?extra_headers ?hb ~of_frame ~to_frame url =
   connect ?crypto ?extra_headers url >>= fun (r2, w2) ->
-  let st = create_st ?on_pong binary in
+  let st = create_st ?on_pong () in
   Monitor.detach_and_iter_errors st.monitor ~f:(fun exn ->
       Log.err (fun m -> m "%a" Exn.pp exn);
       Pipe.close_read r2;
@@ -177,9 +177,9 @@ let connect ?on_pong ?crypto ?(binary = false) ?extra_headers ?hb ~of_frame
     Pipe.close w2 );
   return (create r3 w3)
 
-let with_connection ?on_pong ?crypto ?binary ?extra_headers ?hb ~of_frame
-    ~to_frame uri f =
-  connect ?on_pong ?binary ?extra_headers ?hb ?crypto ~of_frame ~to_frame uri
+let with_connection ?on_pong ?crypto ?extra_headers ?hb ~of_frame ~to_frame uri
+    f =
+  connect ?on_pong ?extra_headers ?hb ?crypto ~of_frame ~to_frame uri
   >>= fun { r = r3; w = w3 } ->
   Monitor.protect
     (fun () -> f r3 w3)
@@ -191,6 +191,10 @@ let with_connection ?on_pong ?crypto ?binary ?extra_headers ?hb ~of_frame
           Deferred.ignore_m (Pipe.upstream_flushed r3);
           Deferred.ignore_m (Pipe.upstream_flushed w3);
         ])
+
+let of_frame_s { Frame.payload; _ } = Bigstring.to_string payload
+
+let to_frame_s msg = Frame.String.textf "%s" msg
 
 module type RW = sig
   type r

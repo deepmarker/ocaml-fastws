@@ -9,8 +9,8 @@ module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 let main url =
   Random.self_init ();
-  Fastws_async.with_connection ~of_payload:(Option.map ~f:Bigstring.to_string)
-    ~to_payload:Bigstring.of_string url (fun r w ->
+  Fastws_async.with_connection ~of_frame:Fastws_async.of_frame_s
+    ~to_frame:Fastws_async.to_frame_s url (fun r w ->
       Deferred.all_unit
         [
           Pipe.transfer
@@ -19,7 +19,7 @@ let main url =
             ~f:(fun s -> String.chop_suffix_exn s ~suffix:"\n");
           Pipe.transfer r
             Writer.(pipe @@ Lazy.force stderr)
-            ~f:(function None -> "" | Some s -> s ^ "\n");
+            ~f:(fun s -> s ^ "\n");
         ])
 
 let url_cmd = Command.Arg_type.create Uri.of_string

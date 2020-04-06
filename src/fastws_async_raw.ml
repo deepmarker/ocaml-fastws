@@ -27,15 +27,15 @@ let pp_client_connection_error ppf (e : Client_connection.error) =
 
 let write_frame w { Frame.header; payload } =
   Pipe.write w (Header header) >>= fun () ->
-  match payload with
-  | None -> Deferred.unit
-  | Some payload -> Pipe.write w (Payload payload)
+  match Bigstring.length payload with
+  | 0 -> Deferred.unit
+  | _ -> Pipe.write w (Payload payload)
 
 let write_frame_if_open w { Frame.header; payload } =
   Pipe.write_if_open w (Header header) >>= fun () ->
-  match payload with
-  | None -> Deferred.unit
-  | Some payload -> Pipe.write_if_open w (Payload payload)
+  match Bigstring.length payload with
+  | 0 -> Deferred.unit
+  | _ -> Pipe.write_if_open w (Payload payload)
 
 let merge_headers h1 h2 =
   Headers.fold ~init:h2 ~f:(fun k v a -> Headers.add_unless_exists a k v) h1

@@ -97,7 +97,7 @@ module Header : sig
 end
 
 module Frame : sig
-  type t = { header : Header.t; payload : Bigstringaf.t option }
+  type t = { header : Header.t; payload : Bigstringaf.t }
 
   val compare : t -> t -> int
 

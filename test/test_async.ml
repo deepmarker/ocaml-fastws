@@ -11,7 +11,7 @@ let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 let frame = testable Frame.pp Frame.equal
 
 let connect_f mv w =
-  let msg = Frame.String.text "msg" in
+  let msg = Frame.String.textf "msg" in
   write_frame w msg >>= fun () ->
   Mvar.take mv >>= fun header ->
   Mvar.take mv >>= fun payload ->
@@ -19,7 +19,7 @@ let connect_f mv w =
   Mvar.take mv >>| fun _cl ->
   match (header, payload) with
   | Header header, Payload payload ->
-      let msg' = { Frame.header; payload = Some payload } in
+      let msg' = { Frame.header; payload } in
       check frame "" msg msg'
   | _ -> failwith "wrong message sequence"
 
@@ -34,33 +34,29 @@ let connect () =
   Deferred.all_unit
     [ connect_f mv w; Pipe.iter r ~f:(handle_incoming_frame mv) ]
 
-let of_frame { Frame.payload; _ } = Option.map ~f:Bigstring.to_string payload
+let of_frame { Frame.payload; _ } = Bigstring.to_string payload
 
-let to_frame = function
-  | None -> Frame.create Bigstring.create 0
-  | Some msg -> Bigstring.of_string msg
+let to_frame msg = Frame.String.textf "%s" msg
 
 let msg = "msg"
 
 let connect_ez () =
   Fastws_async.connect ~of_frame ~to_frame url >>= fun { r; w; _ } ->
-  Pipe.write w (Some msg) >>= fun () ->
+  Pipe.write w msg >>= fun () ->
   Pipe.read r >>= fun res ->
   Pipe.close w;
   Pipe.close_read r;
   Deferred.all_unit [ Pipe.closed w; Pipe.closed r ] >>| fun () ->
   match res with
   | `Eof -> failwith "did not receive echo"
-  | `Ok None -> failwith "got empty string"
-  | `Ok (Some msg') -> check string "" msg msg'
+  | `Ok msg' -> check string "" msg msg'
 
 let with_connection_ez () =
-  Fastws_async.with_connection ~of_payload ~to_payload url (fun r w ->
-      Pipe.write w (Some msg) >>= fun () ->
+  Fastws_async.with_connection ~of_frame ~to_frame url (fun r w ->
+      Pipe.write w msg >>= fun () ->
       Pipe.read r >>| function
       | `Eof -> failwith "did not receive echo"
-      | `Ok None -> failwith "got empty string"
-      | `Ok (Some msg') -> check string "" msg msg')
+      | `Ok msg' -> check string "" msg msg')
 
 let async =
   [

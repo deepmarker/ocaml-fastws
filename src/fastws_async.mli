@@ -8,7 +8,6 @@ type ('r, 'w) t = { r : 'r Pipe.Reader.t; w : 'w Pipe.Writer.t }
 val connect :
   ?on_pong:(Time_ns.Span.t option -> unit) ->
   ?crypto:(module CRYPTO) ->
-  ?binary:bool ->
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
   of_frame:(Frame.t -> 'r) ->
@@ -19,7 +18,6 @@ val connect :
 val with_connection :
   ?on_pong:(Time_ns.Span.t option -> unit) ->
   ?crypto:(module CRYPTO) ->
-  ?binary:bool ->
   ?extra_headers:Headers.t ->
   ?hb:Time_ns.Span.t ->
   of_frame:(Frame.t -> 'r) ->
@@ -27,6 +25,10 @@ val with_connection :
   Uri.t ->
   ('r Pipe.Reader.t -> 'w Pipe.Writer.t -> 'a Deferred.t) ->
   'a Deferred.t
+
+val of_frame_s : Frame.t -> string
+
+val to_frame_s : string -> Frame.t
 
 module type RW = sig
   type r

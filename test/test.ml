@@ -1,6 +1,8 @@
 open Fastws
 open Alcotest
 
+let payload = Bigstringaf.create 0
+
 let frames =
   let open Frame.String in
   [
@@ -9,14 +11,13 @@ let frames =
     ("empty continution", createf Continuation "");
     ("ping", createf Ping "");
     ("pong", createf Pong "");
-    ("empty close", { header = Header.create Close; payload = None });
+    ("empty close", close ());
     ("close", closef "bleh");
     ( "unfinished cont",
-      { header = Header.create ~final:false Continuation; payload = None } );
+      { header = Header.create ~final:false Continuation; payload } );
     ( "text with rsv",
-      { header = Header.create ~final:false ~rsv:7 Text; payload = None } );
-    ( "empty binary",
-      { header = Header.create ~final:false Binary; payload = None } );
+      { header = Header.create ~final:false ~rsv:7 Text; payload } );
+    ("empty binary", { header = Header.create ~final:false Binary; payload });
     ("text 125", textf "%s" (Crypto.generate 125));
     ("binary 125", binaryf "%s" (Crypto.generate 125));
     ("text 126", textf "%s" (Crypto.generate 126));
@@ -42,9 +43,9 @@ let roundtrip ?mask descr frames () =
       Format.eprintf "Free bytes_in_buffer %d@."
         (Faraday.free_bytes_in_buffer pp);
       Header.serialize pp { header with mask };
-      match payload with
-      | None -> ()
-      | Some payload -> Faraday.write_bigstring pp payload)
+      match Bigstringaf.length payload with
+      | 0 -> ()
+      | _ -> Faraday.write_bigstring pp payload)
     frames;
   let buf = Faraday.serialize_to_bigstring pp in
   let len = Bigstringaf.length buf in
@@ -57,14 +58,11 @@ let roundtrip ?mask descr frames () =
       | `Need _ -> failwith "`Need should not be returned"
       | `Ok (t, nb_read) -> (
           match t.length with
-          | 0 ->
-              inner ({ Frame.header = t; payload = None } :: acc) (pos + nb_read)
+          | 0 -> inner ({ Frame.header = t; payload } :: acc) (pos + nb_read)
           | len ->
               Format.eprintf "matched %d@." len;
               let payload = Bigstringaf.sub buf ~off:(pos + nb_read) ~len in
-              inner
-                ({ header = t; payload = Some payload } :: acc)
-                (pos + nb_read + len) ) )
+              inner ({ header = t; payload } :: acc) (pos + nb_read + len) ) )
   in
   let frames' = inner [] 0 in
   check int "roundtrip list size" (List.length frames) (List.length frames');
