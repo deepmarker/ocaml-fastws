@@ -280,26 +280,30 @@ module Frame = struct
     | _ -> false
 
   module String = struct
-    let kcreate opcode content =
-      match String.length content with
-      | 0 -> { header = Header.create opcode; payload = None }
-      | len ->
-          let content = Bigstringaf.of_string ~off:0 ~len content in
-          { header = Header.create ~length:len opcode; payload = Some content }
+    (* let kcreate opcode payload =
+     *   match payload with
+     *   | None -> create opcode
+     *   | Some payload -> create ~payload opcode
+     * 
+     * let text msg = kcreate Text msg
+     * 
+     * let binary msg = kcreate Binary msg *)
 
-    let text msg = kcreate Text msg
+    let tobig f str =
+      f
+        (let len = String.length str in
+         Bigstringaf.of_string str ~off:0 ~len)
 
-    let binary msg = kcreate Binary msg
+    let createf opcode fmt =
+      Format.kasprintf (tobig (fun payload -> create ~payload opcode)) fmt
 
-    let createf opcode fmt = Format.kasprintf (kcreate opcode) fmt
+    let pingf fmt = createf Ping fmt
 
-    let pingf fmt = Format.kasprintf (kcreate Ping) fmt
+    let pongf fmt = createf Pong fmt
 
-    let pongf fmt = Format.kasprintf (kcreate Pong) fmt
+    let textf fmt = createf Text fmt
 
-    let textf fmt = Format.kasprintf (kcreate Text) fmt
-
-    let binaryf fmt = Format.kasprintf (kcreate Binary) fmt
+    let binaryf fmt = createf Binary fmt
 
     let kclose status msg =
       let msglen = String.length msg in
@@ -328,9 +332,9 @@ module Frame = struct
   end
 
   module Bigstring = struct
-    let text payload = create Text ~payload
+    let text payload = create Text ?payload
 
-    let binary payload = create Binary ~payload
+    let binary payload = create Binary ?payload
 
     let close ?status () =
       match status with

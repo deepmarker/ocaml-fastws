@@ -34,16 +34,16 @@ let connect () =
   Deferred.all_unit
     [ connect_f mv w; Pipe.iter r ~f:(handle_incoming_frame mv) ]
 
-let of_payload = Option.map ~f:Bigstring.to_string
+let of_frame { Frame.payload; _ } = Option.map ~f:Bigstring.to_string payload
 
-let to_payload = function
-  | None -> Bigstring.create 0
+let to_frame = function
+  | None -> Frame.create Bigstring.create 0
   | Some msg -> Bigstring.of_string msg
 
 let msg = "msg"
 
 let connect_ez () =
-  Fastws_async.connect ~of_payload ~to_payload url >>= fun { r; w; _ } ->
+  Fastws_async.connect ~of_frame ~to_frame url >>= fun { r; w; _ } ->
   Pipe.write w (Some msg) >>= fun () ->
   Pipe.read r >>= fun res ->
   Pipe.close w;

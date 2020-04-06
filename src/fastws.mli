@@ -112,10 +112,6 @@ module Frame : sig
   val is_close : t -> bool
 
   module String : sig
-    val text : string -> t
-
-    val binary : string -> t
-
     val createf : Opcode.t -> ('a, Format.formatter, unit, t) format4 -> 'a
 
     val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
@@ -133,9 +129,9 @@ module Frame : sig
   end
 
   module Bigstring : sig
-    val text : Bigstringaf.t -> t
+    val text : Bigstringaf.t option -> t
 
-    val binary : Bigstringaf.t -> t
+    val binary : Bigstringaf.t option -> t
 
     val close : ?status:Status.t * Bigstringaf.t option -> unit -> t
   end

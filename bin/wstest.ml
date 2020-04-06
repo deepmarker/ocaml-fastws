@@ -28,7 +28,7 @@ let run_test url i =
 
 let main url tests =
   Random.self_init ();
-  Deferred.List.iter tests ~f:(run_test url)
+  Deferred.List.iter (List.concat tests) ~f:(run_test url)
 
 let url_cmd = Command.Arg_type.create Uri.of_string
 
@@ -36,13 +36,25 @@ let pp_header ppf (l, _) =
   let now = Time_ns.now () in
   Format.fprintf ppf "%a [%a] " Time_ns.pp now Logs.pp_level l
 
+let range_of_string s =
+  match String.rsplit2 s ~on:'-' with
+  | None -> [ Int.of_string s ]
+  | Some (a, b) ->
+      let a = Int.of_string a in
+      let b = Int.of_string b in
+      List.range ~start:`inclusive ~stop:`inclusive a b
+
+let range =
+  let open Command.Arg_type in
+  comma_separated (map Export.string ~f:range_of_string)
+
 let () =
   Command.async ~summary:"Autobahn test client"
     (let open Command.Let_syntax in
     [%map_open
       let () = Logs_async_reporter.set_level_via_param []
       and url = anon ("url" %: url_cmd)
-      and tests = anon (sequence ("test" %: int)) in
+      and tests = anon ("tests" %: range) in
       fun () ->
         Logs.set_reporter (Logs_async_reporter.reporter ~pp_header ());
         main url tests])
