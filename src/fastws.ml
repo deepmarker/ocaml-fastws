@@ -61,6 +61,7 @@ module Status = struct
     | UnsupportedExtension
     | UnexpectedCondition
     | Unknown of int
+  [@@deriving sexp_of]
 
   let of_int = function
     | 1000 -> NormalClosure
@@ -86,12 +87,20 @@ module Status = struct
     | UnexpectedCondition -> 1011
     | Unknown status -> status
 
+  let pp ppf t =
+    Format.fprintf ppf "%d: %a" (to_int t) Sexplib.Sexp.pp (sexp_of_t t)
+
   let to_bytes t =
     let buf = Bigstringaf.create 2 in
     Bigstringaf.set_int16_be buf 0 (to_int t);
     buf
 
   let blit buf i t = Bigstringaf.set_int16_be buf i (to_int t)
+
+  let of_payload buf =
+    match Bigstringaf.length buf with
+    | 0 | 1 -> None
+    | _ -> Some (of_int (Bigstringaf.get_int16_be buf 0))
 end
 
 module Opcode = struct
@@ -134,6 +143,8 @@ module Opcode = struct
     | Nonctrl i -> i
 
   let is_control = function Ping | Pong | Ctrl _ -> true | _ -> false
+
+  let is_std = function Ctrl _ | Nonctrl _ -> false | _ -> true
 end
 
 module Header = struct

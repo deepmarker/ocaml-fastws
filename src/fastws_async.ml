@@ -21,6 +21,7 @@ type st = {
   monitor : Monitor.t;
   mutable header : Header.t option;
   mutable to_read : int;
+  mutable conn_state : [ `Open | `Closing | `Closed ];
   on_pong : Time_ns.Span.t option -> unit;
 }
 
@@ -30,6 +31,7 @@ let create_st ?(on_pong = Fn.ignore) () =
     monitor = Monitor.create ();
     header = None;
     to_read = 0;
+    conn_state = `Open;
     on_pong;
   }
 
@@ -57,7 +59,6 @@ let reassemble st t =
       st.to_read <- h.length;
       Ok `Continue
   | Payload _, None ->
-      Log.err (fun m -> m "Got %a" Sexplib.Sexp.pp (sexp_of_t t));
       Format.kasprintf Or_error.error_string "payload without a header"
   | Payload b, Some h -> (
       let buflen = Bigstring.length b in
@@ -72,57 +73,40 @@ let reassemble st t =
           st.to_read <- st.to_read - buflen;
           Ok `Continue )
 
-let r3_of_r2 of_frame st r2 w2 ({ Frame.header; payload } as frame) =
-  Log_async.debug (fun m -> m "<- %a" Frame.pp frame) >>= fun () ->
+let r3_of_r2 st ({ Frame.header; payload } as frame) =
   match header.opcode with
-  | Ping ->
-      if Bigstring.length payload < 126 then
-        write_frame w2 { header = { header with opcode = Pong }; payload }
-        >>| fun () -> None
-      else (
-        Pipe.close_read r2;
-        return None )
+  | _ when Opcode.is_control header.opcode && Bigstring.length payload >= 126 ->
+      Error (Some (Status.ProtocolError, "control frame too big"))
+  | Ping -> Ok (Some { frame with header = { header with opcode = Pong } }, None)
   | Close ->
-      let code =
-        match Bigstringaf.length payload with
-        | 0 | 1 -> None
-        | _ -> Some (Bigstringaf.get_int16_be payload 0)
+      let status =
+        Option.value ~default:Status.NormalClosure (Status.of_payload payload)
       in
-      Option.iter code ~f:(fun code ->
-          Log.debug (fun m ->
-              m "Remote endpoint closed connection with code %d" code));
-      write_frame_if_open w2 frame >>| fun () ->
-      Pipe.close_read r2;
-      None
+      Log.debug (fun m ->
+          m "Remote endpoint closed connection (%a)" Status.pp status);
+      Error None
   | Pong -> (
       match Bigstringaf.length payload with
       | 0 ->
           st.on_pong None;
-          Log_async.info (fun m -> m "got unsollicited pong with no payload")
-          >>| fun () -> None
-      | _ -> (
-          Log_async.info (fun m -> m "got unsollicited pong with payload")
-          >>= fun () ->
-          try
-            let now = Time_ns.now () in
-            let old = Time_ns.of_string (Bigstring.to_string payload) in
-            let diff = Time_ns.diff now old in
-            Log_async.debug (fun m -> m "<- PONG %a" Time_ns.Span.pp diff)
-            >>= fun () ->
-            st.on_pong (Some diff);
-            return None
-          with _ -> return None ) )
+          Log.info (fun m -> m "got pong with no payload");
+          Ok (None, None)
+      | _ ->
+          Log.info (fun m -> m "got unsollicited pong with payload");
+          ( try
+              let now = Time_ns.now () in
+              let old = Time_ns.of_string (Bigstring.to_string payload) in
+              let diff = Time_ns.diff now old in
+              Log.debug (fun m -> m "<- PONG %a" Time_ns.Span.pp diff);
+              st.on_pong (Some diff)
+            with _ -> () );
+          Ok (None, None) )
   | Text | Binary ->
       assert (Bigstring.length payload = header.length);
-      return (Some (of_frame frame))
+      Ok (None, Some frame)
   | Continuation -> assert false
   | Ctrl _ | Nonctrl _ ->
-      write_frame w2
-        (Frame.Bigstring.close ~status:(Status.UnsupportedExtension, None) ())
-      >>| fun () ->
-      Pipe.close w2;
-      Pipe.close_read r2;
-      None
+      Error (Some (Status.UnsupportedExtension, "unsupported extension"))
 
 let heartbeat w span =
   let terminated = Ivar.create () in
@@ -135,31 +119,77 @@ let heartbeat w span =
   Clock_ns.after span >>> fun () ->
   Clock_ns.run_at_intervals' ~continue_on_error:false ~stop span write_ping
 
+let write_close st w fr =
+  match st.conn_state with
+  | `Closed -> Deferred.unit
+  | `Closing ->
+      st.conn_state <- `Closed;
+      write_frame_if_open w fr
+  | `Open ->
+      st.conn_state <- `Closing;
+      write_frame w fr
+
+let decr_conn_state st =
+  st.conn_state <-
+    ( match st.conn_state with
+    | `Open -> `Closing
+    | `Closing -> `Closed
+    | `Closed -> `Closed )
+
+let check_hdr_before_reassemble = function
+  | Payload _ -> true
+  | Header h ->
+      Log.debug (fun m -> m "%a" Header.pp h);
+      h.rsv = 0 && Opcode.is_std h.opcode
+
+exception Closing of Frame.t
+
+let closing fr = raise (Closing fr)
+
 let mk_r3 of_frame st r2 w2 =
   Pipe.create_reader ~close_on_exception:false (fun to_r3 ->
+      let close_all () =
+        Pipe.close_read r2;
+        Pipe.close w2;
+        Pipe.close to_r3
+      in
       Pipe.transfer' r2 to_r3 ~f:(fun q ->
           let ret = Queue.create () in
-          Deferred.Queue.iter q ~f:(fun t ->
-              match reassemble st t with
-              | Error msg ->
-                  let fr =
-                    Frame.String.close
-                      ~status:
-                        ( Status.ProtocolError,
-                          Some ("\000\000" ^ Error.to_string_hum msg) )
-                      ()
-                  in
-                  Pipe.write w2 (Header fr.header) >>= fun () ->
-                  Pipe.write w2 (Payload fr.payload) >>= fun () ->
-                  Pipe.close to_r3;
-                  Deferred.unit
-              | Ok `Continue -> Deferred.unit
-              | Ok (`Frame fr) -> (
-                  r3_of_r2 of_frame st r2 w2 fr >>= function
-                  | None -> Deferred.unit
-                  | Some v ->
-                      Queue.enqueue ret v;
-                      Deferred.unit ))
+          let reassemble_and_process t =
+            match check_hdr_before_reassemble t with
+            | false ->
+                closing
+                @@ Frame.String.closef ~status:Status.ProtocolError
+                     "invalid header"
+            | _ -> (
+                match reassemble st t with
+                | Error msg ->
+                    closing
+                    @@ Frame.String.close
+                         ~status:
+                           ( Status.ProtocolError,
+                             Some ("\000\000" ^ Error.to_string_hum msg) )
+                         ()
+                | Ok `Continue -> Deferred.unit
+                | Ok (`Frame fr) -> (
+                    Log.debug (fun m -> m "<- %a" Frame.pp fr);
+                    match r3_of_r2 st fr with
+                    | Error None ->
+                        (* got a close frame *)
+                        decr_conn_state st;
+                        closing fr
+                    | Error (Some (status, msg)) ->
+                        closing @@ Frame.String.closef ~status "%s" msg
+                    | Ok (for_w2, for_r3) ->
+                        Option.fold for_w2 ~init:Deferred.unit ~f:(fun _ ->
+                            write_frame w2)
+                        >>| fun () ->
+                        Option.iter
+                          ~f:(fun fr -> Queue.enqueue ret (of_frame fr))
+                          for_r3 ) )
+          in
+          ( try Deferred.Queue.iter q ~f:reassemble_and_process
+            with Closing fr -> write_close st w2 fr >>| close_all )
           >>| fun () -> ret))
 
 let mk_w3 to_frame w2 =
@@ -201,12 +231,15 @@ let with_connection ?on_pong ?crypto ?extra_headers ?hb ~of_frame ~to_frame uri
   Monitor.protect
     (fun () -> f r3 w3)
     ~finally:(fun () ->
+      Log_async.debug (fun m -> m "Fastws_async.with_connection: finally")
+      >>= fun () ->
       Pipe.close_read r3;
       Pipe.close w3;
       Deferred.all_unit
         [
-          Deferred.ignore_m (Pipe.upstream_flushed r3);
-          Deferred.ignore_m (Pipe.upstream_flushed w3);
+          (* Deferred.ignore_m (Pipe.upstream_flushed r3); *)
+          (* Deferred.ignore_m (Pipe.downstream_flushed w3); *)
+          Deferred.unit;
         ])
 
 let of_frame_s { Frame.payload; _ } = Bigstring.to_string payload

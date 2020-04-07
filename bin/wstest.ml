@@ -16,9 +16,7 @@ let url_of_test url prefix i =
 let run_test url section j =
   Fastws_async.with_connection ~of_frame:Fn.id ~to_frame:Fn.id
     (url_of_test url section j) (fun r w ->
-      Pipe.iter r ~f:(fun (fr : Frame.t) ->
-          Log_async.debug (fun m -> m "Got %S" (Bigstring.to_string fr.payload))
-          >>= fun () -> Pipe.write w fr))
+      Pipe.iter r ~f:(fun (fr : Frame.t) -> Pipe.write w fr))
 
 let main url section tests =
   Random.self_init ();

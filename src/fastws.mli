@@ -40,9 +40,13 @@ module Status : sig
     | UnexpectedCondition
     | Unknown of int
 
+  val pp : Format.formatter -> t -> unit
+
   val of_int : int -> t
 
   val to_int : t -> int
+
+  val of_payload : Bigstringaf.t -> t option
 end
 
 module Opcode : sig
@@ -64,6 +68,8 @@ module Opcode : sig
   val to_int : t -> int
 
   val is_control : t -> bool
+
+  val is_std : t -> bool
 
   val pp : Format.formatter -> t -> unit
 end

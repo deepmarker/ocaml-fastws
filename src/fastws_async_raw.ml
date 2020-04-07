@@ -87,7 +87,7 @@ let rec read_response conn r =
       | `Eof | `Eof_with_unconsumed_data _ -> raise Exit
       | `Stopped () -> read_response conn r )
 
-let flush stream w =
+let serialize stream w =
   Faraday_async.serialize stream
     ~yield:(fun _ -> Scheduler.yield ())
     ~writev:(fun iov -> return (write_iovecs w iov))
@@ -99,8 +99,11 @@ let foldf w (a : Fastws.Header.t option) = function
       let h = { t with mask = Some mask } in
       Header.serialize serializer h;
       Faraday.close serializer;
-      flush serializer w >>= fun () ->
-      Log_async.debug (fun m -> m "-> %a" Header.pp t) >>| fun () -> Some h
+      serialize serializer w >>= fun () ->
+      don't_wait_for
+        ( Writer.flushed w >>= fun () ->
+          Log_async.debug (fun m -> m "-> %a" Header.pp t) );
+      return (Some h)
   | Payload buf -> (
       match a with
       | Some { mask = Some mask; _ } ->
@@ -109,11 +112,14 @@ let foldf w (a : Fastws.Header.t option) = function
           Faraday.write_bigstring serializer buf;
           Faraday.close serializer;
           Header.xormask ~mask buf;
-          Log_async.debug (fun m ->
-              m "-> %s"
-                Bigstring.(to_string buf ~pos:0 ~len:(min 4096 (length buf))))
-          >>= fun () ->
-          flush serializer w >>| fun () -> None
+          serialize serializer w >>= fun () ->
+          don't_wait_for
+            ( Writer.flushed w >>= fun () ->
+              Log_async.debug (fun m ->
+                  m "-> %s"
+                    Bigstring.(
+                      to_string buf ~pos:0 ~len:(min 4096 (length buf)))) );
+          return None
       | _ -> failwith "current header must exist" )
 
 let mk_w2 ~monitor:_ w =
@@ -121,12 +127,18 @@ let mk_w2 ~monitor:_ w =
       let downstream_flushed () =
         match Pipe.is_closed r with
         | true -> return `Reader_closed (* Not sure if this is correct. *)
-        | false -> Writer.flushed w >>| fun () -> `Ok
+        | false ->
+            Deferred.any_unit Writer.[ flushed w; close_started w ]
+            >>| fun () -> `Ok
       in
       let consumer = Pipe.add_consumer r ~downstream_flushed in
-      Pipe.fold' ~flushed:(Consumer consumer) r ~init:None ~f:(fun init q ->
-          Deferred.Queue.fold q ~init ~f:(foldf w))
-      |> Deferred.ignore_m)
+      Deferred.any_unit
+        [
+          Writer.close_started w;
+          Pipe.fold' ~flushed:(Consumer consumer) r ~init:None ~f:(fun init q ->
+              Deferred.Queue.fold q ~init ~f:(foldf w))
+          |> Deferred.ignore_m;
+        ])
 
 type st = { h : Header.t; payload : Bigstring.t; mutable pos : int }
 
@@ -154,9 +166,12 @@ let handle_chunk w =
       assert (missing_len > len - !consumed);
       return (`Consumed (!consumed, `Need missing_len)) )
     else
-      write_st w st >>= fun () ->
-      current_header := None;
-      read_header buf ~pos ~len
+      match Pipe.is_closed w with
+      | true -> return (`Stop ())
+      | false ->
+          write_st w st >>= fun () ->
+          current_header := None;
+          read_header buf ~pos ~len
   and read_header buf ~pos ~len =
     assert (Option.is_none !current_header);
     match len - !consumed with
@@ -170,7 +185,11 @@ let handle_chunk w =
         | `Ok (h, read) ->
             consumed := !consumed + read;
             if h.length = 0 then
-              Pipe.write w (Header h) >>= fun () -> read_header buf ~pos ~len
+              match Pipe.is_closed w with
+              | true -> return (`Stop ())
+              | false ->
+                  Pipe.write w (Header h) >>= fun () ->
+                  read_header buf ~pos ~len
             else (
               current_header := Some (create_st h);
               read_payload buf ~pos ~len ) )
