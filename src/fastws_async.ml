@@ -20,7 +20,6 @@ type st = {
   buf : Bigbuffer.t;
   monitor : Monitor.t;
   mutable header : Header.t option;
-  mutable to_read : int;
   mutable conn_state : [ `Open | `Closing | `Closed ];
   on_pong : Time_ns.Span.t option -> unit;
 }
@@ -30,16 +29,16 @@ let create_st ?(on_pong = Fn.ignore) () =
     buf = Bigbuffer.create 13;
     monitor = Monitor.create ();
     header = None;
-    to_read = 0;
     conn_state = `Open;
     on_pong;
   }
 
 let reassemble st t =
-  if is_header t then Bigbuffer.clear st.buf;
   match (t, st.header) with
   | Header { opcode; final = false; _ }, _ when Opcode.is_control opcode ->
       Format.kasprintf Or_error.error_string "fragmented control frame"
+  (* | Header { opcode; _ }, _ when Opcode.is_control opcode ->
+   *     Format.kasprintf Or_error.error_string "fragmented control frame" *)
   | ( Header ({ opcode = Text; final = true; _ } as h),
       Some ({ final = false; _ } as h') )
   | ( Header ({ opcode = Binary; final = true; _ } as h),
@@ -48,30 +47,27 @@ let reassemble st t =
       Some ({ final = false; _ } as h') ) ->
       Format.kasprintf Or_error.error_string "unfinished continuation: %a@.%a"
         Header.pp h Header.pp h'
-  | Header { opcode = Continuation; length; _ }, _ ->
-      st.to_read <- length;
+  | Header ({ opcode = Continuation; _ } as ch), Some h ->
+      st.header <- Some { ch with opcode = h.opcode };
       Ok `Continue
   | Header ({ length = 0; final = true; _ } as h), _ ->
       st.header <- None;
       Ok (`Frame { Frame.header = h; payload })
   | Header h, _ ->
       st.header <- Some h;
-      st.to_read <- h.length;
       Ok `Continue
   | Payload _, None ->
       Format.kasprintf Or_error.error_string "payload without a header"
   | Payload b, Some h -> (
-      let buflen = Bigstring.length b in
-      match h.final && buflen = st.to_read with
+      Bigbuffer.add_bigstring st.buf b;
+      match h.final with
       | true ->
-          Bigbuffer.add_bigstring st.buf b;
           st.header <- None;
           let payload = Bigbuffer.big_contents st.buf in
-          Ok (`Frame { Frame.header = h; payload })
-      | false ->
-          Bigbuffer.add_bigstring st.buf b;
-          st.to_read <- st.to_read - buflen;
-          Ok `Continue )
+          let length = Bigstring.length payload in
+          Bigbuffer.clear st.buf;
+          Ok (`Frame { Frame.header = { h with length }; payload })
+      | false -> Ok `Continue )
 
 let r3_of_r2 st ({ Frame.header; payload } as frame) =
   match header.opcode with
@@ -101,9 +97,7 @@ let r3_of_r2 st ({ Frame.header; payload } as frame) =
               st.on_pong (Some diff)
             with _ -> () );
           Ok (None, None) )
-  | Text | Binary ->
-      assert (Bigstring.length payload = header.length);
-      Ok (None, Some frame)
+  | Text | Binary -> Ok (None, Some frame)
   | Continuation -> assert false
   | Ctrl _ | Nonctrl _ ->
       Error (Some (Status.UnsupportedExtension, "unsupported extension"))
@@ -137,7 +131,9 @@ let decr_conn_state st =
     | `Closed -> `Closed )
 
 let check_hdr_before_reassemble = function
-  | Payload _ -> true
+  | Payload _ ->
+      Log.debug (fun m -> m "<payload>");
+      true
   | Header h ->
       Log.debug (fun m -> m "%a" Header.pp h);
       h.rsv = 0 && Opcode.is_std h.opcode
