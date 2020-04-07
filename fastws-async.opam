@@ -15,16 +15,14 @@ depends: [
   "fastws"
   "core" {>= "v0.13.0"}
   "async" {>= "v0.13.0"}
-  "logs-async"
+  "logs-async" {>= "1.1"}
   "faraday-async" {>= "0.7.0"}
-  "async-uri"
+  "async-uri" {>= "0.2"}
   "alcotest" {with-test & >= "1.0.1"}
   "alcotest-async" {with-test & >= "1.0.1"}
 ]
 pin-depends: [
   ["fastws.dev" "git+https://github.com/deepmarker/ocaml-fastws.git"]
-  ["async-uri.dev" "git+https://github.com/deepmarker/async-uri.git"]
-  ["logs-async.dev" "git+https://github.com/deepmarker/logs-async.git"]
 ]
 synopsis: "Fast websocket library"
 description: """
