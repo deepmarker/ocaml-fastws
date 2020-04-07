@@ -147,7 +147,8 @@ let create_st h =
   { h; payload; pos = 0 }
 
 let write_st w { h; payload; _ } =
-  Pipe.write w (Header h) >>= fun () -> Pipe.write w (Payload payload)
+  Pipe.write_without_pushback w (Header h);
+  Pipe.write_without_pushback w (Payload payload)
 
 let handle_chunk w =
   let current_header = ref None in
@@ -169,7 +170,7 @@ let handle_chunk w =
       match Pipe.is_closed w with
       | true -> return (`Stop ())
       | false ->
-          write_st w st >>= fun () ->
+          write_st w st;
           current_header := None;
           read_header buf ~pos ~len
   and read_header buf ~pos ~len =
@@ -184,12 +185,12 @@ let handle_chunk w =
         | `Need n -> return (`Consumed (!consumed, `Need n))
         | `Ok (h, read) ->
             consumed := !consumed + read;
-            if h.length = 0 then
+            if h.length = 0 then (
               match Pipe.is_closed w with
               | true -> return (`Stop ())
               | false ->
-                  Pipe.write w (Header h) >>= fun () ->
-                  read_header buf ~pos ~len
+                  Pipe.write_without_pushback w (Header h);
+                  read_header buf ~pos ~len )
             else (
               current_header := Some (create_st h);
               read_payload buf ~pos ~len ) )
@@ -197,9 +198,11 @@ let handle_chunk w =
   fun buf ~pos ~len ->
     (* Log_async.debug (fun m -> m "handle_chunk") >>= fun () -> *)
     consumed := 0;
-    match !current_header with
+    ( match !current_header with
     | None -> read_header buf ~pos ~len
-    | Some _ -> read_payload buf ~pos ~len
+    | Some _ -> read_payload buf ~pos ~len )
+    >>= fun ret ->
+    Pipe.pushback w >>= fun () -> return ret
 
 let mk_r2 ~monitor r =
   Pipe.create_reader ~close_on_exception:false (fun to_r2 ->

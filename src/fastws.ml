@@ -145,6 +145,8 @@ module Opcode = struct
   let is_control = function Ping | Pong | Ctrl _ -> true | _ -> false
 
   let is_std = function Ctrl _ | Nonctrl _ -> false | _ -> true
+
+  let is_continuation = function Continuation -> true | _ -> false
 end
 
 module Header = struct

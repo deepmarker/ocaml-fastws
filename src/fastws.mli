@@ -71,6 +71,8 @@ module Opcode : sig
 
   val is_std : t -> bool
 
+  val is_continuation : t -> bool
+
   val pp : Format.formatter -> t -> unit
 end
 

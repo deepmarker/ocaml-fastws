@@ -14,12 +14,12 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
-let payload = Bigstring.create 0
+let empty_payload = Bigstring.create 0
 
 type st = {
   buf : Bigbuffer.t;
   monitor : Monitor.t;
-  mutable header : Header.t option;
+  mutable header : Header.t list;
   mutable conn_state : [ `Open | `Closing | `Closed ];
   on_pong : Time_ns.Span.t option -> unit;
 }
@@ -28,46 +28,64 @@ let create_st ?(on_pong = Fn.ignore) () =
   {
     buf = Bigbuffer.create 13;
     monitor = Monitor.create ();
-    header = None;
+    header = [];
     conn_state = `Open;
     on_pong;
   }
 
 let reassemble st t =
+  let return_buffer ?b h t =
+    st.header <- t;
+    Option.iter b ~f:(Bigbuffer.add_bigstring st.buf);
+    let payload = Bigbuffer.big_contents st.buf in
+    let length = Bigstring.length payload in
+    Bigbuffer.clear st.buf;
+    Ok (`Frame { Frame.header = { h with length }; payload })
+  in
   match (t, st.header) with
+  (* Payload cases: eats a header *)
+  | Payload _, [] ->
+      Format.kasprintf Or_error.error_string "payload without a header"
+  | Payload b, h :: t -> (
+      match (h.final, t) with
+      | true, [] ->
+          return_buffer ~b h t
+          (* st.header <- t;
+           * Bigbuffer.add_bigstring st.buf b;
+           * let payload = Bigbuffer.big_contents st.buf in
+           * let length = Bigstring.length payload in
+           * Bigbuffer.clear st.buf;
+           * Ok (`Frame { Frame.header = { h with length }; payload }) *)
+      | false, [] ->
+          Bigbuffer.add_bigstring st.buf b;
+          Ok `Continue
+      | true, _ ->
+          st.header <- t;
+          Ok (`Frame { Frame.header = h; payload = b })
+      | false, _ -> assert false )
+  (* Erroneous header cases *)
   | Header { opcode; final = false; _ }, _ when Opcode.is_control opcode ->
       Format.kasprintf Or_error.error_string "fragmented control frame"
-  (* | Header { opcode; _ }, _ when Opcode.is_control opcode ->
-   *     Format.kasprintf Or_error.error_string "fragmented control frame" *)
-  | ( Header ({ opcode = Text; final = true; _ } as h),
-      Some ({ final = false; _ } as h') )
-  | ( Header ({ opcode = Binary; final = true; _ } as h),
-      Some ({ final = false; _ } as h') )
-  | ( Header ({ opcode = Nonctrl _; final = true; _ } as h),
-      Some ({ final = false; _ } as h') ) ->
-      Format.kasprintf Or_error.error_string "unfinished continuation: %a@.%a"
-        Header.pp h Header.pp h'
-  | Header ({ opcode = Continuation; _ } as ch), Some h ->
-      st.header <- Some { ch with opcode = h.opcode };
-      Ok `Continue
-  | Header ({ length = 0; final = true; _ } as h), _ ->
-      st.header <- None;
-      Ok (`Frame { Frame.header = h; payload })
+  | Header { opcode; final = true; _ }, { final = false; _ } :: _
+    when not Opcode.(is_control opcode || is_continuation opcode) ->
+      Format.kasprintf Or_error.error_string "unfinished continuation"
+  (* Valid header cases *)
+  | Header ({ opcode = Continuation; final; length; _ } as ch), _ -> (
+      match st.header with
+      | [] -> Format.kasprintf Or_error.error_string "orphan continuation frame"
+      | h :: t ->
+          if final && length = 0 then return_buffer { h with final = true } t
+          else (
+            st.header <- { ch with opcode = h.opcode } :: t;
+            Ok `Continue ) )
+  | Header ({ length = 0; final = true; _ } as h), [] ->
+      Ok (`Frame { Frame.header = h; payload = empty_payload })
+  | Header ({ opcode; length = 0; _ } as h), _ :: _
+    when Opcode.is_control opcode ->
+      Ok (`Frame { Frame.header = h; payload = empty_payload })
   | Header h, _ ->
-      st.header <- Some h;
+      st.header <- h :: st.header;
       Ok `Continue
-  | Payload _, None ->
-      Format.kasprintf Or_error.error_string "payload without a header"
-  | Payload b, Some h -> (
-      Bigbuffer.add_bigstring st.buf b;
-      match h.final with
-      | true ->
-          st.header <- None;
-          let payload = Bigbuffer.big_contents st.buf in
-          let length = Bigstring.length payload in
-          Bigbuffer.clear st.buf;
-          Ok (`Frame { Frame.header = { h with length }; payload })
-      | false -> Ok `Continue )
 
 let r3_of_r2 st ({ Frame.header; payload } as frame) =
   match header.opcode with
@@ -184,9 +202,15 @@ let mk_r3 of_frame st r2 w2 =
                           ~f:(fun fr -> Queue.enqueue ret (of_frame fr))
                           for_r3 ) )
           in
-          ( try Deferred.Queue.iter q ~f:reassemble_and_process
-            with Closing fr -> write_close st w2 fr >>| close_all )
-          >>| fun () -> ret))
+          try_with ~extract_exn:true (fun () ->
+              Deferred.Queue.iter q ~f:reassemble_and_process)
+          >>= function
+          | Ok () -> return ret
+          | Error (Closing fr) ->
+              write_close st w2 fr >>| fun () ->
+              close_all ();
+              Queue.create ()
+          | Error exn -> raise exn))
 
 let mk_w3 to_frame w2 =
   Pipe.create_writer (fun from_w3 ->
