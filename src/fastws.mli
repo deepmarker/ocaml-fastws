@@ -40,6 +40,8 @@ module Status : sig
     | UnexpectedCondition
     | Unknown of int
 
+  val is_unknown : t -> bool
+
   val pp : Format.formatter -> t -> unit
 
   val of_int : int -> t

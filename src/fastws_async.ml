@@ -24,6 +24,12 @@ type st = {
   on_pong : Time_ns.Span.t option -> unit;
 }
 
+let pp ppf st =
+  Format.fprintf ppf "st[%a '%s']"
+    (Format.pp_print_list ~pp_sep:Format.pp_print_space Header.pp)
+    st.header
+    (Bigbuffer.contents st.buf)
+
 let create_st ?(on_pong = Fn.ignore) () =
   {
     buf = Bigbuffer.create 13;
@@ -132,6 +138,10 @@ let heartbeat w span =
   Clock_ns.run_at_intervals' ~continue_on_error:false ~stop span write_ping
 
 let write_close st w fr =
+  ( match Status.of_payload fr.Frame.payload with
+  | Some status when Status.is_unknown status ->
+      Bigstringaf.set_int16_be fr.payload 0 Status.(to_int ProtocolError)
+  | _ -> () );
   match st.conn_state with
   | `Closed -> Deferred.unit
   | `Closing ->
@@ -184,8 +194,11 @@ let mk_r3 of_frame st r2 w2 =
                            ( Status.ProtocolError,
                              Some ("\000\000" ^ Error.to_string_hum msg) )
                          ()
-                | Ok `Continue -> Deferred.unit
+                | Ok `Continue ->
+                    Log_async.debug (fun m -> m "%a" pp st) >>= fun () ->
+                    Deferred.unit
                 | Ok (`Frame fr) -> (
+                    Log_async.debug (fun m -> m "%a" pp st) >>= fun () ->
                     Log.debug (fun m -> m "<- %a" Frame.pp fr);
                     match r3_of_r2 st fr with
                     | Error None ->

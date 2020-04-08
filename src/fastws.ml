@@ -87,6 +87,8 @@ module Status = struct
     | UnexpectedCondition -> 1011
     | Unknown status -> status
 
+  let is_unknown = function Unknown _ -> true | _ -> false
+
   let pp ppf t =
     Format.fprintf ppf "%d: %a" (to_int t) Sexplib.Sexp.pp (sexp_of_t t)
 
@@ -142,7 +144,7 @@ module Opcode = struct
     | Ctrl i -> i
     | Nonctrl i -> i
 
-  let is_control = function Ping | Pong | Ctrl _ -> true | _ -> false
+  let is_control = function Close | Ping | Pong | Ctrl _ -> true | _ -> false
 
   let is_std = function Ctrl _ | Nonctrl _ -> false | _ -> true
 
