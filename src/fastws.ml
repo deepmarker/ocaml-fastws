@@ -279,22 +279,26 @@ module Frame = struct
     | { header = { opcode = Close; _ }; _ } -> true
     | _ -> false
 
-  module String = struct
-    (* let kcreate opcode payload =
-     *   match payload with
-     *   | None -> create opcode
-     *   | Some payload -> create ~payload opcode
-     * 
-     * let text msg = kcreate Text msg
-     * 
-     * let binary msg = kcreate Binary msg *)
+  let empty_text = create Text
 
-    let tobig f str =
-      f
-        (let len = String.length str in
-         Bigstringaf.of_string str ~off:0 ~len)
+  let empty_binary = create Binary
+
+  module String = struct
+    let kcreate opcode payload =
+      let len = String.length payload in
+      let payload = Bigstringaf.of_string payload ~off:0 ~len in
+      create ~payload opcode
+
+    let text = kcreate Text
+
+    let binary = kcreate Binary
 
     let createf opcode fmt =
+      let tobig f str =
+        (let len = String.length str in
+         Bigstringaf.of_string str ~off:0 ~len)
+        |> f
+      in
       Format.kasprintf (tobig (fun payload -> create ~payload opcode)) fmt
 
     let pingf fmt = createf Ping fmt
@@ -304,13 +308,6 @@ module Frame = struct
     let textf fmt = createf Text fmt
 
     let binaryf fmt = createf Binary fmt
-
-    let kclose status msg =
-      let msglen = String.length msg in
-      let payload = Bigstringaf.create (2 + msglen) in
-      Bigstringaf.set_int16_be payload 0 (Status.to_int status);
-      Bigstringaf.blit_from_string msg ~src_off:0 payload ~dst_off:2 ~len:msglen;
-      { header = Header.create ~length:(2 + msglen) Close; payload }
 
     let close ?status () =
       match status with
@@ -325,13 +322,21 @@ module Frame = struct
           create ~payload Close
 
     let closef ?(status = Status.NormalClosure) fmt =
-      Format.kasprintf (kclose status) fmt
+      let close status msg =
+        let msglen = String.length msg in
+        let payload = Bigstringaf.create (2 + msglen) in
+        Bigstringaf.set_int16_be payload 0 (Status.to_int status);
+        Bigstringaf.blit_from_string msg ~src_off:0 payload ~dst_off:2
+          ~len:msglen;
+        { header = Header.create ~length:(2 + msglen) Close; payload }
+      in
+      Format.kasprintf (close status) fmt
   end
 
   module Bigstring = struct
-    let text payload = create Text ?payload
+    let text payload = create ~payload Text
 
-    let binary payload = create Binary ?payload
+    let binary payload = create ~payload Binary
 
     let close ?status () =
       match status with
