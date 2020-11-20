@@ -8,9 +8,7 @@ env:
     - PINS="logs-async.dev async-uri.dev fastws.dev:."
 
   matrix:
-    - OCAML_VERSION="4.08" PACKAGE="fastws"
-    - OCAML_VERSION="4.08" PACKAGE="fastws-async"
-    - OCAML_VERSION="4.09" PACKAGE="fastws"
-    - OCAML_VERSION="4.09" PACKAGE="fastws-async"
+    - OCAML_VERSION="4.11" PACKAGE="fastws"
+    - OCAML_VERSION="4.11" PACKAGE="fastws-async"
 os:
 - linux

@@ -1,12 +1,9 @@
 open Core
 open Async
 open Fastws
+open Log.Global
 
 let src = Logs.Src.create "fastws.async.wstest"
-
-module Log = (val Logs.src_log src : Logs.LOG)
-
-module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 let url_of_test url prefix i =
   let open Uri in
@@ -14,13 +11,14 @@ let url_of_test url prefix i =
     [ ("casetuple", prefix ^ "." ^ string_of_int i); ("agent", "fastws") ]
 
 let run_test url section j =
-  Fastws_async.with_connection ~of_frame:Fn.id ~to_frame:Fn.id
-    (url_of_test url section j) (fun r w ->
-      Pipe.iter r ~f:(fun (fr : Frame.t) -> Pipe.write w fr))
+  Async_uri.with_connection url (fun { r; w; _ } ->
+      Fastws_async.with_connection (url_of_test url section j) r w Fn.id Fn.id
+        (fun r w -> Pipe.iter r ~f:(fun (fr : Frame.t) -> Pipe.write w fr)))
 
 let main url section tests =
   Random.self_init ();
-  Deferred.List.iter (List.concat tests) ~f:(run_test url section)
+  Deferred.Or_error.List.iter (List.concat tests) ~f:(fun x ->
+      Fastws_async_raw.to_or_error (run_test url section x))
 
 let url_cmd = Command.Arg_type.create Uri.of_string
 
@@ -41,14 +39,12 @@ let range =
   comma_separated (map Export.string ~f:range_of_string)
 
 let () =
-  Command.async ~summary:"Autobahn test client"
+  Command.async_or_error ~summary:"Autobahn test client"
     (let open Command.Let_syntax in
     [%map_open
-      let () = Logs_async_reporter.set_level_via_param []
+      let () = set_level_via_param ()
       and url = anon ("url" %: url_cmd)
       and section = anon ("section" %: string)
       and tests = anon ("tests" %: range) in
-      fun () ->
-        Logs.set_reporter (Logs_async_reporter.reporter ~pp_header ());
-        main url section tests])
+      fun () -> main url section tests])
   |> Command.run

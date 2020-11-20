@@ -5,24 +5,37 @@
 
 open Core
 open Async
+open Httpaf
 open Fastws
 
-type t = Header of Header.t | Payload of Bigstring.t [@@deriving sexp_of]
+type t = {header: Header.t; payload: Bigstring.t option} [@@deriving sexp_of]
 
+type err =
+  [ `Connection_error of Client_connection.error
+  | `Invalid_response of Response.t
+  | `Timeout ]
+
+val to_error : err -> Error.t
+val to_or_error : ('a, err) Deferred.Result.t -> 'a Deferred.Or_error.t
 val is_header : t -> bool
-
-val write_frame : t Pipe.Writer.t -> Frame.t -> unit Deferred.t
-
 val write_frame_if_open : t Pipe.Writer.t -> Frame.t -> unit Deferred.t
 
 val connect :
-  ?version:Async_ssl.Version.t ->
-  ?options:Async_ssl.Opt.t list ->
-  ?socket:([ `Unconnected ], Socket.Address.Inet.t) Socket.t ->
-  ?crypto:(module Fastws.CRYPTO) ->
   ?extra_headers:Httpaf.Headers.t ->
-  (Uri.t -> (t Pipe.Reader.t * t Pipe.Writer.t) Deferred.t)
-  Tcp.with_connect_options
+  ?extensions:(string * string option) list ->
+  ?protocols:string list ->
+  ?timeout:Time.Span.t ->
+  ?monitor:Monitor.t ->
+  Uri.t ->
+  Reader.t ->
+  Writer.t ->
+  ( (string * string option) list * t Pipe.Reader.t * t Pipe.Writer.t,
+    err )
+  Deferred.Result.t
+
+(**/*)
+
+val serialize : Faraday.t -> Writer.t -> unit Deferred.t
 
 (*---------------------------------------------------------------------------
    Copyright (c) 2020 DeepMarker

@@ -14,33 +14,29 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
-type t = Header of Header.t | Payload of Bigstring.t [@@deriving sexp_of]
+type t = { header : Header.t; payload : Bigstring.t option }
+[@@deriving sexp_of]
 
-let is_header = function Header _ -> true | _ -> false
+type err =
+  [ `Connection_error of (Client_connection.error[@sexp.opaque])
+  | `Invalid_response of (Response.t[@sexp.opaque])
+  | `Timeout ]
+[@@deriving sexp_of]
 
-let pp_client_connection_error ppf (e : Client_connection.error) =
-  match e with
-  | `Exn e -> Format.fprintf ppf "Exception %a" Exn.pp e
-  | `Invalid_response_body_length resp ->
-      Format.fprintf ppf "Invalid response body length %a" Response.pp_hum resp
-  | `Malformed_response msg -> Format.fprintf ppf "Malformed response %s" msg
+let to_error x = Error.create_s (sexp_of_err x)
 
-let write_frame w { Frame.header; payload } =
-  Pipe.write w (Header header) >>= fun () ->
-  match Bigstring.length payload with
-  | 0 -> Deferred.unit
-  | _ -> Pipe.write w (Payload payload)
+let to_or_error =
+  Deferred.Result.map_error ~f:(fun x -> Error.create_s (sexp_of_err x))
+
+let is_header { payload; _ } = Option.is_none payload
 
 let write_frame_if_open w { Frame.header; payload } =
-  Pipe.write_if_open w (Header header) >>= fun () ->
-  match Bigstring.length payload with
-  | 0 -> Deferred.unit
-  | _ -> Pipe.write_if_open w (Payload payload)
+  Pipe.write_if_open w { header; payload = Some payload }
 
 let merge_headers h1 h2 =
   Headers.fold ~init:h2 ~f:(fun k v a -> Headers.add_unless_exists a k v) h1
 
-let response_handler iv nonce crypto r _body =
+let response_handler w iv nonce crypto r _body =
   let module Crypto = (val crypto : CRYPTO) in
   Log.debug (fun m -> m "%a" Response.pp_hum r);
   let upgrade_hdr =
@@ -56,9 +52,9 @@ let response_handler iv nonce crypto r _body =
     when String.equal v expected_sec ->
       Ivar.fill_if_empty iv (Ok r)
   | _ ->
+      don't_wait_for (Writer.close w);
       Log.err (fun m -> m "Invalid response %a" Response.pp_hum r);
-      Ivar.fill_if_empty iv
-        (Format.kasprintf Or_error.error_string "%a" Response.pp_hum r)
+      Ivar.fill_if_empty iv (Error (`Invalid_response r))
 
 let write_iovecs w iovecs =
   let nbWritten =
@@ -84,7 +80,15 @@ let rec read_response conn r =
           let nb_read = Client_connection.read conn buf ~off:pos ~len in
           return (`Stop_consumed ((), nb_read)))
       >>= function
-      | `Eof | `Eof_with_unconsumed_data _ -> raise Exit
+      | `Eof ->
+          let buf = Bigstringaf.create 0 in
+          ignore (Client_connection.read_eof conn buf ~off:0 ~len:0);
+          Deferred.unit
+      | `Eof_with_unconsumed_data buf ->
+          let len = String.length buf in
+          let buf = Bigstringaf.of_string ~off:0 ~len buf in
+          ignore (Client_connection.read_eof conn buf ~off:0 ~len);
+          Deferred.unit
       | `Stopped () -> read_response conn r )
 
 let serialize stream w =
@@ -92,51 +96,53 @@ let serialize stream w =
     ~yield:(fun _ -> Scheduler.yield ())
     ~writev:(fun iov -> return (write_iovecs w iov))
 
-let foldf w (a : Fastws.Header.t option) = function
-  | Header t ->
-      let serializer = Faraday.create 6 in
-      let mask = Crypto.(to_string (generate 4)) in
-      let h = { t with mask = Some mask } in
-      Header.serialize serializer h;
-      Faraday.close serializer;
-      serialize serializer w >>= fun () ->
-      don't_wait_for
-        ( Writer.flushed w >>= fun () ->
-          Log_async.debug (fun m -> m "-> %a" Header.pp t) );
-      return (Some h)
-  | Payload buf -> (
-      match a with
-      | Some { mask = Some mask; _ } ->
-          let serializer = Faraday.create (Bigstring.length buf + 6) in
-          Header.xormask ~mask buf;
-          Faraday.write_bigstring serializer buf;
-          Faraday.close serializer;
-          Header.xormask ~mask buf;
-          serialize serializer w >>= fun () ->
-          don't_wait_for
-            ( Writer.flushed w >>= fun () ->
-              Log_async.debug (fun m ->
-                  m "-> %s"
-                    Bigstring.(
-                      to_string buf ~pos:0 ~len:(min 4096 (length buf)))) );
-          return None
-      | _ -> failwith "current header must exist" )
+let iterf w { header; payload } =
+  let read_header t =
+    let serializer = Faraday.create 6 in
+    let mask = Crypto.(to_string (generate 4)) in
+    let (h : Header.t) = { t with mask = Some mask } in
+    Header.serialize serializer h;
+    Faraday.close serializer;
+    serialize serializer w >>= fun () ->
+    don't_wait_for
+      ( Writer.flushed w >>= fun () ->
+        Log_async.debug (fun m -> m "-> %a" Header.pp t) );
+    return mask
+  in
+  let read_payload mask buf =
+    let serializer = Faraday.create (Bigstring.length buf + 6) in
+    Header.xormask ~mask buf;
+    Faraday.write_bigstring serializer buf;
+    Faraday.close serializer;
+    Header.xormask ~mask buf;
+    serialize serializer w >>= fun () ->
+    don't_wait_for
+      ( Writer.flushed w >>= fun () ->
+        Log_async.debug (fun m ->
+            m "-> %s"
+              Bigstring.(to_string buf ~pos:0 ~len:(min 4096 (length buf)))) );
+    Deferred.unit
+  in
+  read_header header >>= fun mask ->
+  Option.value_map payload ~default:Deferred.unit ~f:(read_payload mask)
 
-let mk_w2 ~monitor:_ w =
+let mk_w2 ?monitor w =
   Pipe.create_writer (fun r ->
+      don't_wait_for (Pipe.closed r >>= fun () -> Writer.close w);
       let downstream_flushed () =
         match Pipe.is_closed r with
         | true -> return `Reader_closed (* Not sure if this is correct. *)
         | false ->
-            Deferred.any_unit Writer.[ flushed w; close_started w ]
+            Deferred.any_unit Writer.[ flushed w; close_finished w ]
             >>| fun () -> `Ok
       in
       let consumer = Pipe.add_consumer r ~downstream_flushed in
       Deferred.any_unit
         [
-          Writer.close_started w;
-          Pipe.fold' ~flushed:(Consumer consumer) r ~init:None ~f:(fun init q ->
-              Deferred.Queue.fold q ~init ~f:(foldf w))
+          ( Monitor.detach_and_get_next_error (Writer.monitor w) >>| fun exn ->
+            Option.iter monitor ~f:(fun m -> Monitor.send_exn m exn) );
+          Pipe.iter' ~flushed:(Consumer consumer) r ~f:(fun q ->
+              Deferred.Queue.iter q ~f:(iterf w))
           |> Deferred.ignore_m;
         ])
 
@@ -146,9 +152,8 @@ let create_st h =
   let payload = Bigstring.create h.Header.length in
   { h; payload; pos = 0 }
 
-let write_st w { h; payload; _ } =
-  Pipe.write_without_pushback w (Header h);
-  Pipe.write_without_pushback w (Payload payload)
+let write_st w { h = header; payload; _ } =
+  Pipe.write_without_pushback w { header; payload = Some payload }
 
 let handle_chunk w =
   let current_header = ref None in
@@ -189,7 +194,7 @@ let handle_chunk w =
               match Pipe.is_closed w with
               | true -> return (`Stop ())
               | false ->
-                  Pipe.write_without_pushback w (Header h);
+                  Pipe.write_without_pushback w { header = h; payload = None };
                   read_header buf ~pos ~len )
             else (
               current_header := Some (create_st h);
@@ -204,21 +209,14 @@ let handle_chunk w =
     >>= fun ret ->
     Pipe.pushback w >>= fun () -> return ret
 
-let mk_r2 ~monitor r =
-  Pipe.create_reader ~close_on_exception:false (fun to_r2 ->
-      Scheduler.within' ~monitor (fun () ->
-          let handle_chunk = handle_chunk to_r2 in
-          Monitor.protect
-            (fun () -> Reader.read_one_chunk_at_a_time r ~handle_chunk)
-            ~finally:(fun () ->
-              Log_async.debug (fun m ->
-                  m "Fastws_async_raw.mk_client_read: finally")
-              >>= fun () ->
-              Pipe.close to_r2;
-              Reader.close r)
-          |> Deferred.ignore_m))
+let mk_r2 r =
+  Pipe.create_reader ~close_on_exception:false (fun w ->
+      don't_wait_for (Pipe.closed w >>= fun () -> Reader.close r);
+      let handle_chunk = handle_chunk w in
+      Reader.read_one_chunk_at_a_time r ~handle_chunk |> Deferred.ignore_m)
 
-let initialize ?timeout ?(extra_headers = Headers.empty) url r w =
+let initialize ?monitor ?timeout ?(extra_headers = Headers.empty)
+    ?(extensions = [ ("permessage-deflate", None) ]) ?protocols url r w =
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
     match (Uri.host url, Uri.port url) with
@@ -227,49 +225,37 @@ let initialize ?timeout ?(extra_headers = Headers.empty) url r w =
     | Some h, None -> Headers.add extra_headers "Host" h
     | _ -> extra_headers
   in
-  let headers = merge_headers headers (Fastws.headers nonce) in
+  let headers =
+    merge_headers headers (Fastws.headers ~extensions ?protocols nonce)
+  in
   let req = Request.create ~headers `GET (Uri.path_and_query url) in
   let ok = Ivar.create () in
   let error_handler e =
-    Ivar.fill ok
-      (Format.kasprintf Or_error.error_string "%a" pp_client_connection_error e)
+    don't_wait_for (Writer.close w);
+    Ivar.fill ok (Error (`Connection_error e))
   in
-  let response_handler = response_handler ok nonce (module Crypto) in
+  let response_handler = response_handler w ok nonce (module Crypto) in
   let _body, conn =
     Client_connection.request req ~error_handler ~response_handler
   in
   flush_req conn w;
-  don't_wait_for (read_response conn r);
+  don't_wait_for (Scheduler.within' ?monitor (fun () -> read_response conn r));
   Log_async.debug (fun m -> m "%a" Request.pp_hum req) >>= fun () ->
   let timeout =
     match timeout with
     | None -> Deferred.never ()
-    | Some timeout ->
-        Clock.after timeout >>| fun () ->
-        Format.kasprintf Or_error.error_string "Timeout %a" Time.Span.pp timeout
+    | Some timeout -> Clock.after timeout >>| fun () -> Error `Timeout
   in
-  Deferred.any [ Ivar.read ok; timeout ] >>= function
-  | Error e -> Error.raise e
-  | Ok v -> Deferred.return v
+  Deferred.any [ Ivar.read ok; timeout ]
 
-let connect ?version ?options ?socket ?(crypto = (module Crypto : CRYPTO))
-    ?extra_headers ?buffer_age_limit ?interrupt ?reader_buffer_size
-    ?writer_buffer_size ?timeout url =
-  let module Crypto = (val crypto : CRYPTO) in
-  Async_uri.connect ?version ?options ?socket ?buffer_age_limit ?interrupt
-    ?reader_buffer_size ?writer_buffer_size ?timeout url
-  >>= fun { r; w; _ } ->
-  initialize ?timeout ?extra_headers url r w >>| fun _resp ->
-  let monitor = Monitor.create () in
-  let r2 = mk_r2 ~monitor r in
-  let w2 = mk_w2 ~monitor w in
-  (* don't_wait_for
-   *   ( Reader.close_finished r >>= fun () ->
-   *     Log_async.debug (fun m -> m "reader closed") ); *)
-  let log_exn exn = Log.err (fun m -> m "%a" Exn.pp exn) in
-  Monitor.detach_and_iter_errors monitor ~f:log_exn;
-  Monitor.detach_and_iter_errors (Writer.monitor w) ~f:log_exn;
-  (r2, w2)
+let connect ?extra_headers ?extensions ?protocols ?timeout ?monitor url r w =
+  initialize ?timeout ?extra_headers ?extensions ?protocols url r w
+  >>|? fun resp ->
+  let exts =
+    Option.value_map ~default:[] ~f:extension_parser
+      (Headers.get resp.headers "sec-websocket-extensions")
+  in
+  (exts, mk_r2 r, mk_w2 ?monitor w)
 
 (*---------------------------------------------------------------------------
    Copyright (c) 2020 DeepMarker

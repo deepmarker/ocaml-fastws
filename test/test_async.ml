@@ -1,72 +1,82 @@
 open Core
 open Async
 open Alcotest
-open Alcotest_async
 open Fastws
 open Fastws_async
 open Fastws_async_raw
 
 let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
-
 let frame = testable Frame.pp Frame.equal
 
 let connect_f mv w =
   let msg = Frame.String.textf "msg" in
-  write_frame w msg >>= fun () ->
-  Mvar.take mv >>= fun header ->
-  Mvar.take mv >>= fun payload ->
-  write_frame w (Frame.Bigstring.close ()) >>= fun () ->
-  Mvar.take mv >>| fun _cl ->
-  match (header, payload) with
-  | Header header, Payload payload ->
-      let msg' = { Frame.header; payload } in
-      check frame "" msg msg'
-  | _ -> failwith "wrong message sequence"
+  write_frame_if_open w msg
+  >>= fun () ->
+  Mvar.take mv
+  >>= fun {header; payload} ->
+  write_frame_if_open w (Frame.Bigstring.close ())
+  >>= fun () ->
+  Mvar.take mv
+  >>| fun _cl ->
+  let msg' =
+    {Frame.header; payload= Option.value ~default:(Bigstringaf.create 0) payload}
+  in
+  check frame "" msg msg'
 
-let handle_incoming_frame mv = function
-  | Fastws_async_raw.Header _ as fr -> Mvar.put mv fr
-  | Payload pld ->
-      Mvar.put mv (Payload Bigstringaf.(copy pld ~off:0 ~len:(length pld)))
+let handle_incoming_frame mv x = Mvar.put mv x
 
 let connect () =
   let mv = Mvar.create () in
-  Fastws_async_raw.connect url >>= fun (r, w) ->
-  Deferred.all_unit
-    [ connect_f mv w; Pipe.iter r ~f:(handle_incoming_frame mv) ]
+  Async_uri.connect url
+  >>= fun {r; w; _} ->
+  Fastws_async_raw.(to_or_error (connect url r w))
+  >>=? fun (_exts, r, w) ->
+  Deferred.all_unit [connect_f mv w; Pipe.iter r ~f:(handle_incoming_frame mv)]
+  >>= fun () -> Deferred.Or_error.return ()
 
-let of_frame { Frame.payload; _ } = Bigstring.to_string payload
-
+let of_frame {Frame.payload; _} = Bigstring.to_string payload
 let to_frame msg = Frame.String.textf "%s" msg
-
 let msg = "msg"
 
 let connect_ez () =
-  Fastws_async.connect ~of_frame ~to_frame url >>= fun { r; w; _ } ->
-  Pipe.write w msg >>= fun () ->
-  Pipe.read r >>= fun res ->
-  Pipe.close w;
-  Pipe.close_read r;
-  Deferred.all_unit [ Pipe.closed w; Pipe.closed r ] >>| fun () ->
-  match res with
-  | `Eof -> failwith "did not receive echo"
-  | `Ok msg' -> check string "" msg msg'
+  Async_uri.with_connection url (fun {r; w; _} ->
+      Fastws_async_raw.to_or_error
+        (Fastws_async.connect url r w of_frame to_frame)
+      >>=? fun {r; w; _} ->
+      Pipe.write w msg
+      >>= fun () ->
+      Pipe.read r
+      >>= fun res ->
+      Pipe.close w ;
+      Pipe.close_read r ;
+      Deferred.all_unit [Pipe.closed w; Pipe.closed r]
+      >>= fun () ->
+      match res with
+      | `Eof -> failwith "did not receive echo"
+      | `Ok msg' ->
+          check string "" msg msg' ;
+          Deferred.Or_error.return ())
 
 let with_connection_ez () =
-  Fastws_async.with_connection ~of_frame ~to_frame url (fun r w ->
-      Pipe.write w msg >>= fun () ->
-      Pipe.read r >>| function
-      | `Eof -> failwith "did not receive echo"
-      | `Ok msg' -> check string "" msg msg')
+  Async_uri.with_connection url (fun {r; w; _} ->
+      Fastws_async.with_connection url r w of_frame to_frame (fun r w ->
+          Pipe.write w msg
+          >>= fun () ->
+          Pipe.read r
+          >>| function
+          | `Eof -> failwith "did not receive echo"
+          | `Ok msg' -> check string "" msg msg')
+      |> Fastws_async_raw.to_or_error)
+
+let runtest a b c =
+  Alcotest_async.test_case a b (fun () -> Deferred.Or_error.ok_exn (c ()))
 
 let async =
-  [
-    test_case "connect" `Quick connect;
-    test_case "connect_ez" `Quick connect_ez;
-    test_case "with_connection_ez" `Quick with_connection_ez;
-  ]
+  [ runtest "connect" `Quick connect; runtest "connect_ez" `Quick connect_ez;
+    runtest "with_connection_ez" `Quick with_connection_ez ]
 
-let main () = run "fastws-async" [ ("async", async) ]
+let main () = Alcotest_async.run "fastws-async" [("async", async)]
 
 let () =
-  don't_wait_for (main ());
+  don't_wait_for (main ()) ;
   never_returns (Scheduler.go ())

@@ -19,4 +19,5 @@
    async
    logs-async
    faraday-async
-   async-uri))
+   async-uri
+   zlib))

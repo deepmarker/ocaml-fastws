@@ -8,43 +8,63 @@ open Async
 open Fastws
 open Httpaf
 
-type ('r, 'w) t = { r : 'r Pipe.Reader.t; w : 'w Pipe.Writer.t }
+type ('r, 'w) t = {r: 'r Pipe.Reader.t; w: 'w Pipe.Writer.t}
 
 val connect :
   ?on_pong:(Time_ns.Span.t option -> unit) ->
-  ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
+  ?extensions:(string * string option) list ->
+  ?protocols:string list ->
+  ?monitor:Monitor.t ->
   ?hb:Time_ns.Span.t ->
-  of_frame:(Frame.t -> 'r) ->
-  to_frame:('w -> Frame.t) ->
   Uri.t ->
-  ('r, 'w) t Deferred.t
+  Reader.t ->
+  Writer.t ->
+  (Frame.t -> 'r) ->
+  ('w -> Frame.t) ->
+  (('r, 'w) t, Fastws_async_raw.err) Deferred.Result.t
 
 val with_connection :
   ?on_pong:(Time_ns.Span.t option -> unit) ->
-  ?crypto:(module CRYPTO) ->
   ?extra_headers:Headers.t ->
+  ?extensions:(string * string option) list ->
+  ?protocols:string list ->
+  ?monitor:Monitor.t ->
   ?hb:Time_ns.Span.t ->
-  of_frame:(Frame.t -> 'r) ->
-  to_frame:('w -> Frame.t) ->
   Uri.t ->
+  Reader.t ->
+  Writer.t ->
+  (Frame.t -> 'r) ->
+  ('w -> Frame.t) ->
   ('r Pipe.Reader.t -> 'w Pipe.Writer.t -> 'a Deferred.t) ->
-  'a Deferred.t
+  ('a, Fastws_async_raw.err) Deferred.Result.t
 
 val of_frame_s : Frame.t -> string
-
 val to_frame_s : string -> Frame.t
 
-module type RW = sig
-  type r
+val connect_or_result :
+  ?on_pong:(Time_ns.Span.t option -> unit) ->
+  ?extra_headers:Headers.t ->
+  ?extensions:(string * string option) list ->
+  ?protocols:string list ->
+  ?monitor:Monitor.t ->
+  ?hb:Time_ns.Span.t ->
+  (Frame.t -> 'r) ->
+  ('w -> Frame.t) ->
+  Uri.t ->
+  (('r, 'w) t, Fastws_async_raw.err) Deferred.Result.t
 
-  type w
-end
-
-module MakePersistent (A : RW) :
-  Persistent_connection_kernel.T
-    with type t = (A.r, A.w) t
-     and type Address.t = Uri.t
+val connect_or_error :
+  ?on_pong:(Time_ns.Span.t option -> unit) ->
+  ?extra_headers:Headers.t ->
+  ?extensions:(string * string option) list ->
+  ?protocols:string list ->
+  ?monitor:Monitor.t ->
+  ?hb:Time_ns.Span.t ->
+  (Frame.t -> 'r) ->
+  ('w -> Frame.t) ->
+  Uri.t ->
+  ('r, 'w) t Deferred.Or_error.t
 
 (*---------------------------------------------------------------------------
    Copyright (c) 2020 DeepMarker
