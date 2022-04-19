@@ -12,11 +12,11 @@ depends: [
   "fastws"
   "base64" {>= "3.4.0"}
   "uri-sexp" {>= "4.0.0"}
-  "core" {>= "v0.14.0"}
-  "async" {>= "v0.14.0"}
+  "core" {>= "v0.15.0"}
+  "async" {>= "v0.15.0"}
   "logs-async" {>= "1.1"}
   "faraday-async" {>= "0.7.2"}
-  "async-uri" {>= "0.2.1"}
+  "async-uri" {>= "0.3.0"}
   "zlib" {>= "0.6"}
   "alcotest" {with-test & >= "1.2.3"}
   "alcotest-async" {with-test & >= "1.2.3"}

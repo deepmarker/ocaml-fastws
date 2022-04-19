@@ -1,4 +1,5 @@
 open Core
+open Core_unix
 open Async
 open Fastws
 open Log.Global
@@ -23,8 +24,8 @@ let main url section tests =
 let url_cmd = Command.Arg_type.create Uri.of_string
 
 let pp_header ppf (l, _) =
-  let now = Time_ns.now () in
-  Format.fprintf ppf "%a [%a] " Time_ns.pp now Logs.pp_level l
+  let now = Time_ns_unix.now () in
+  Format.fprintf ppf "%a [%a] " Time_ns_unix.pp now Logs.pp_level l
 
 let range_of_string s =
   match String.rsplit2 s ~on:'-' with
@@ -47,4 +48,4 @@ let () =
       and section = anon ("section" %: string)
       and tests = anon ("tests" %: range) in
       fun () -> main url section tests])
-  |> Command.run
+  |> Command_unix.run

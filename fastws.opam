@@ -11,7 +11,7 @@ depends: [
   "ocaml" {>= "4.09.0"}
   "dune" {>= "1.11.4"}
   "sexplib" {>= "v0.14.0"}
-  "ppx_sexp_conv" {>= "v0.14.0"}
+  "ppx_sexp_conv" {>= "v0.15.1"}
   "faraday" {>= "0.7.2"}
   "httpaf" {>= "0.6.6"}
   "alcotest" {with-test & >= "1.2.3"}

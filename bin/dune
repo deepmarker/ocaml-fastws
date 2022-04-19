@@ -3,4 +3,4 @@
  (public_names wscat wstest)
  (preprocess (pps ppx_jane))
  (package fastws-async)
- (libraries core async fastws-async))
+ (libraries core core_unix.command_unix async fastws-async))

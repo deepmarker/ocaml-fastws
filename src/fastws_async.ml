@@ -19,7 +19,7 @@ type st =
   { buf: Bigbuffer.t;
     mutable header: Header.t option;
     mutable conn_state: [`Open | `Closing | `Closed];
-    on_pong: Time_ns.Span.t option -> unit;
+    on_pong: Time_ns_unix.Span.t option -> unit;
     permessage_deflate: bool;
     inflate: Zlib.inflate Zlib.t }
 
@@ -138,10 +138,10 @@ let r3_of_r2 st ({Frame.header; payload} as frame) =
         Ok (None, None)
     | _ ->
         ( try
-            let now = Time_ns.now () in
-            let old = Time_ns.of_string (Bigstring.to_string payload) in
-            let diff = Time_ns.diff now old in
-            Log.debug (fun m -> m "<- PONG %a" Time_ns.Span.pp diff) ;
+            let now = Time_ns_unix.now () in
+            let old = Time_ns_unix.of_string (Bigstring.to_string payload) in
+            let diff = Time_ns_unix.diff now old in
+            Log.debug (fun m -> m "<- PONG %a" Time_ns_unix.Span.pp diff) ;
             st.on_pong (Some diff)
           with _ -> () ) ;
         Ok (None, None) )
@@ -154,9 +154,9 @@ let heartbeat w span =
   let write_ping () =
     Log_async.debug (fun m -> m "-> PING")
     >>= fun () ->
-    let ping = Frame.String.pingf "%a" Time_ns.pp (Time_ns.now ()) in
+    let ping = Frame.String.pingf "%a" Time_ns_unix.pp (Time_ns_unix.now ()) in
     Fastws_async_raw.write_frame_if_open w ping in
-  let start = Time_ns.(add (now ()) span) in
+  let start = Time_ns_unix.(add (now ()) span) in
   let stop = Pipe.closed w in
   Clock_ns.run_at_intervals' ~continue_on_error:false ~start ~stop span
     write_ping

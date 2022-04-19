@@ -1,4 +1,5 @@
 open Core
+open Core_unix
 open Async
 open Log.Global
 
@@ -26,4 +27,4 @@ let () =
     [%map_open
       let () = set_level_via_param () and url = anon ("url" %: url_cmd) in
       fun () -> Fastws_async_raw.to_or_error (main url)])
-  |> Command.run
+  |> Command_unix.run
