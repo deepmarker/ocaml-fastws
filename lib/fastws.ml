@@ -10,7 +10,6 @@ module type CRYPTO = sig
   type g
 
   val generate : ?g:g -> int -> buffer
-  val sha_1 : buffer -> buffer
   val of_string : string -> buffer
   val to_string : buffer -> string
 end
@@ -24,8 +23,6 @@ module Crypto = struct
 
   let generate ?(g = Random.get_state ()) len =
     String.init len (fun _ -> Char.chr @@ Random.State.int g 256)
-
-  include Sha1
 end
 
 let websocket_uuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -37,7 +34,8 @@ let string_of_exts exts =
     (fun i (k, v) ->
       Buffer.add_string buf k ;
       Option.iter (fun x -> Buffer.add_char buf '=' ; Buffer.add_string buf x) v ;
-      if i < pred len then (Buffer.add_char buf ';' ; Buffer.add_char buf ' '))
+      if i < pred len then (Buffer.add_char buf ';' ; Buffer.add_char buf ' ')
+      )
     exts ;
   Buffer.contents buf
 
@@ -57,9 +55,9 @@ let headers ?extensions ?protocols nonce =
         ("Sec-WebSocket-Key", nonce); ("Sec-WebSocket-Version", "13") ] in
   let h =
     Option.fold protocols ~none:h ~some:(fun ps ->
-        Headers.add h "Sec-WebSocket-Protocol" (String.concat ", " ps)) in
+        Headers.add h "Sec-WebSocket-Protocol" (String.concat ", " ps) ) in
   Option.fold extensions ~none:h ~some:(fun exts ->
-      Headers.add h "Sec-WebSocket-Extensions" (string_of_exts exts))
+      Headers.add h "Sec-WebSocket-Extensions" (string_of_exts exts) )
 
 module Status = struct
   type t =
@@ -296,7 +294,7 @@ module Frame = struct
     let tobig f str =
       f
         (let len = String.length str in
-         Bigstringaf.of_string str ~off:0 ~len)
+         Bigstringaf.of_string str ~off:0 ~len )
 
     let createf opcode fmt =
       Format.kasprintf (tobig (fun payload -> create ~payload opcode)) fmt

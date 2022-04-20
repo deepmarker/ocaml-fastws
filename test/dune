@@ -10,7 +10,7 @@
 (test
  (name       test_async)
  (modules    test_async)
- (preprocess (pps ppx_sexp_conv))
+ (preprocess (pps ppx_jane))
  (package    fastws-async)
  (libraries
    core

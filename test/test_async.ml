@@ -3,7 +3,7 @@ open Async
 open Alcotest
 open Fastws
 open Fastws_async
-open Fastws_async_raw
+open Fastws_async.Raw
 
 let url = Uri.make ~scheme:"http" ~host:"echo.websocket.org" ~path:"echo" ()
 let frame = testable Frame.pp Frame.equal
@@ -29,10 +29,10 @@ let connect () =
   let mv = Mvar.create () in
   Async_uri.connect url
   >>= fun {r; w; _} ->
-  Fastws_async_raw.(to_or_error (connect url r w))
+  Fastws_async.Raw.(to_or_error (connect url r w))
   >>=? fun (_exts, r, w) ->
   Deferred.all_unit [connect_f mv w; Pipe.iter r ~f:(handle_incoming_frame mv)]
-  >>= fun () -> Deferred.Or_error.return ()
+  >>= fun () -> Deferred.Or_error.ok_unit
 
 let of_frame {Frame.payload; _} = Bigstring.to_string payload
 let to_frame msg = Frame.String.textf "%s" msg
@@ -40,7 +40,7 @@ let msg = "msg"
 
 let connect_ez () =
   Async_uri.with_connection url (fun {r; w; _} ->
-      Fastws_async_raw.to_or_error
+      Fastws_async.Raw.to_or_error
         (Fastws_async.connect url r w of_frame to_frame)
       >>=? fun {r; w; _} ->
       Pipe.write w msg
@@ -55,7 +55,7 @@ let connect_ez () =
       | `Eof -> failwith "did not receive echo"
       | `Ok msg' ->
           check string "" msg msg' ;
-          Deferred.Or_error.return ())
+          Deferred.Or_error.ok_unit )
 
 let with_connection_ez () =
   Async_uri.with_connection url (fun {r; w; _} ->
@@ -65,8 +65,8 @@ let with_connection_ez () =
           Pipe.read r
           >>| function
           | `Eof -> failwith "did not receive echo"
-          | `Ok msg' -> check string "" msg msg')
-      |> Fastws_async_raw.to_or_error)
+          | `Ok msg' -> check string "" msg msg' )
+      |> Fastws_async.Raw.to_or_error )
 
 let runtest a b c =
   Alcotest_async.test_case a b (fun () -> Deferred.Or_error.ok_exn (c ()))
@@ -75,8 +75,8 @@ let async =
   [ runtest "connect" `Quick connect; runtest "connect_ez" `Quick connect_ez;
     runtest "with_connection_ez" `Quick with_connection_ez ]
 
-let main () = Alcotest_async.run "fastws-async" [("async", async)]
+let main () = Alcotest.run "fastws-async" [("async", async)]
 
 let () =
-  don't_wait_for (main ()) ;
+  main () ;
   never_returns (Scheduler.go ())

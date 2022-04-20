@@ -55,6 +55,7 @@ val connect_or_result :
   (('r, 'w) t, Fastws_async_raw.err) Deferred.Result.t
 
 val connect_or_error :
+  ?timeout:Time_ns.Span.t ->
   ?on_pong:(Time_ns.Span.t option -> unit) ->
   ?extra_headers:Headers.t ->
   ?extensions:(string * string option) list ->
@@ -65,6 +66,8 @@ val connect_or_error :
   ('w -> Frame.t) ->
   Uri.t ->
   ('r, 'w) t Deferred.Or_error.t
+
+module Raw = Fastws_async_raw
 
 (*---------------------------------------------------------------------------
    Copyright (c) 2020 DeepMarker

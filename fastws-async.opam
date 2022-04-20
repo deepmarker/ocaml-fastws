@@ -6,19 +6,21 @@ bug-reports: "https://github.com/deepmarker/ocaml-fastws/issues"
 dev-repo: "git+https://github.com/deepmarker/ocaml-fastws"
 doc: "https://deepmarker.github.io/ocaml-fastws/doc"
 build: [ "dune" "build" "-j" jobs "-p" name ]
+# run-test: [ "dune" "runtest" "-j" jobs "-p" name ]
 depends: [
-  "ocaml" {>= "4.09.0"}
+  "ocaml" {>= "4.08.0"}
   "dune" {>= "1.11.4"}
+  "base64" {>= "3.2.0"}
+  "uri-sexp" {>= "3.1.0"}
   "fastws"
-  "base64" {>= "3.4.0"}
-  "uri-sexp" {>= "4.0.0"}
-  "core" {>= "v0.14.0"}
-  "async" {>= "v0.14.0"}
+  "core" {>= "v0.13.0"}
+  "async" {>= "v0.13.0"}
   "logs-async" {>= "1.1"}
-  "faraday-async" {>= "0.7.2"}
-  "async-uri" {>= "0.2.1"}
-  "zlib" {>= "0.6"}
-  "alcotest" {with-test & >= "1.2.3"}
-  "alcotest-async" {with-test & >= "1.2.3"}
+  "faraday-async" {>= "0.7.0"}
+  "async-uri" {>= "0.2"}
+  "alcotest" {with-test & >= "1.0.1"}
+  "alcotest-async" {with-test & >= "1.0.1"}
 ]
-synopsis: "Fast websocket library — Async"
+synopsis: "Fast websocket library"
+description: """
+"""

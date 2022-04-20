@@ -37,7 +37,7 @@ let roundtrip ?mask descr frames () =
       Header.serialize pp {header with mask} ;
       match Bigstringaf.length payload with
       | 0 -> ()
-      | _ -> Faraday.write_bigstring pp payload)
+      | _ -> Faraday.write_bigstring pp payload )
     frames ;
   let buf = Faraday.serialize_to_bigstring pp in
   let len = Bigstringaf.length buf in
@@ -59,7 +59,7 @@ let roundtrip ?mask descr frames () =
   check int "roundtrip list size" (List.length frames) (List.length frames') ;
   List.iter2
     (fun f f' ->
-      check frame descr {f with header= {f.Frame.header with mask}} f')
+      check frame descr {f with header= {f.Frame.header with mask}} f' )
     frames frames'
 
 let roundtrip_unmasked =

@@ -11,7 +11,6 @@ open Fastws
 let src = Logs.Src.create "fastws.async.raw"
 
 module Log = (val Logs.src_log src : Logs.LOG)
-
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 
 type t = { header : Header.t; payload : Bigstring.t option }
@@ -44,8 +43,8 @@ let response_handler w iv nonce crypto r _body =
   in
   let sec_ws_accept_hdr = Headers.get r.headers "sec-websocket-accept" in
   let expected_sec =
-    Base64.encode_exn
-      Crypto.(sha_1 (of_string (nonce ^ websocket_uuid)) |> to_string)
+    let open Digestif.SHA1 in
+    digest_string (nonce ^ websocket_uuid) |> to_raw_string |> Base64.encode_exn
   in
   match (r.version, r.status, upgrade_hdr, sec_ws_accept_hdr) with
   | { major = 1; minor = 1 }, `Switching_protocols, Some "websocket", Some v
@@ -89,7 +88,7 @@ let rec read_response conn r =
           let buf = Bigstringaf.of_string ~off:0 ~len buf in
           ignore (Client_connection.read_eof conn buf ~off:0 ~len);
           Deferred.unit
-      | `Stopped () -> read_response conn r )
+      | `Stopped () -> read_response conn r)
 
 let serialize stream w =
   Faraday_async.serialize stream
@@ -139,10 +138,12 @@ let mk_w2 ?monitor w =
       let consumer = Pipe.add_consumer r ~downstream_flushed in
       Deferred.any_unit
         [
+          Writer.close_started w;
+          Writer.close_finished w;
           ( Monitor.detach_and_get_next_error (Writer.monitor w) >>| fun exn ->
             Option.iter monitor ~f:(fun m -> Monitor.send_exn m exn) );
-          Pipe.iter' ~flushed:(Consumer consumer) r ~f:(fun q ->
-              Deferred.Queue.iter q ~f:(iterf w))
+          Pipe.iter' ~flushed:(Consumer consumer) r
+            ~f:(Deferred.Queue.iter ~f:(iterf w))
           |> Deferred.ignore_m;
         ])
 
@@ -170,7 +171,7 @@ let handle_chunk w =
     let missing_len = wanted_len - will_read in
     if missing_len > 0 then (
       assert (missing_len > len - !consumed);
-      return (`Consumed (!consumed, `Need missing_len)) )
+      return (`Consumed (!consumed, `Need missing_len)))
     else
       match Pipe.is_closed w with
       | true -> return (`Stop ())
@@ -195,17 +196,17 @@ let handle_chunk w =
               | true -> return (`Stop ())
               | false ->
                   Pipe.write_without_pushback w { header = h; payload = None };
-                  read_header buf ~pos ~len )
+                  read_header buf ~pos ~len)
             else (
               current_header := Some (create_st h);
-              read_payload buf ~pos ~len ) )
+              read_payload buf ~pos ~len))
   in
   fun buf ~pos ~len ->
     (* Log_async.debug (fun m -> m "handle_chunk") >>= fun () -> *)
     consumed := 0;
-    ( match !current_header with
+    (match !current_header with
     | None -> read_header buf ~pos ~len
-    | Some _ -> read_payload buf ~pos ~len )
+    | Some _ -> read_payload buf ~pos ~len)
     >>= fun ret ->
     Pipe.pushback w >>= fun () -> return ret
 
@@ -217,6 +218,7 @@ let mk_r2 r =
 
 let initialize ?monitor ?timeout ?(extra_headers = Headers.empty)
     ?(extensions = [ ("permessage-deflate", None) ]) ?protocols url r w =
+  let extensions = match extensions with [] -> None | _ -> Some extensions in
   let nonce = Base64.encode_exn Crypto.(generate 16 |> to_string) in
   let headers =
     match (Uri.host url, Uri.port url) with
@@ -226,7 +228,7 @@ let initialize ?monitor ?timeout ?(extra_headers = Headers.empty)
     | _ -> extra_headers
   in
   let headers =
-    merge_headers headers (Fastws.headers ~extensions ?protocols nonce)
+    merge_headers headers (Fastws.headers ?extensions ?protocols nonce)
   in
   let req = Request.create ~headers `GET (Uri.path_and_query url) in
   let ok = Ivar.create () in
