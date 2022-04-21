@@ -13,13 +13,15 @@ depends: [
   "base64" {>= "3.2.0"}
   "uri-sexp" {>= "3.1.0"}
   "fastws"
-  "core" {>= "v0.13.0"}
-  "async" {>= "v0.13.0"}
+  "core" {>= "v0.15.0"}
+  "async" {>= "v0.15.0"}
   "logs-async" {>= "1.1"}
-  "faraday-async" {>= "0.7.0"}
+  "faraday-async" {>= "0.8.1"}
   "async-uri" {>= "0.2"}
-  "alcotest" {with-test & >= "1.0.1"}
-  "alcotest-async" {with-test & >= "1.0.1"}
+  "digestif" {>= "1.1.2"}
+  "zlib" {>= "0.6"}
+  "alcotest" {with-test & >= "1.5.0"}
+  "alcotest-async" {with-test & >= "1.5.0"}
 ]
 synopsis: "Fast websocket library"
 description: """
