@@ -143,7 +143,7 @@ let mk_w2 ?monitor w =
           ( Monitor.detach_and_get_next_error (Writer.monitor w) >>| fun exn ->
             Option.iter monitor ~f:(fun m -> Monitor.send_exn m exn) );
           Pipe.iter' ~flushed:(Consumer consumer) r
-            ~f:(Deferred.Queue.iter ~f:(iterf w))
+            ~f:(Deferred.Queue.iter ~how:`Sequential ~f:(iterf w))
           |> Deferred.ignore_m;
         ])
 

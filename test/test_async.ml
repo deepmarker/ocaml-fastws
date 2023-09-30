@@ -71,8 +71,5 @@ let async =
     runtest "with_connection_ez" `Quick with_connection_ez;
   ]
 
-let main () = Alcotest.run "fastws-async" [ ("async", async) ]
-
-let () =
-  main ();
-  never_returns (Scheduler.go ())
+let main () = Alcotest_async.run "fastws-async" [ ("async", async) ]
+let () = Thread_safe.block_on_async_exn main

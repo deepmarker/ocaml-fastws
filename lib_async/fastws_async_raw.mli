@@ -25,7 +25,7 @@ val connect :
   ?extra_headers:Httpaf.Headers.t ->
   ?extensions:(string * string option) list ->
   ?protocols:string list ->
-  ?timeout:Time.Span.t ->
+  ?timeout:Time_float_unix.Span.t ->
   ?monitor:Monitor.t ->
   Uri.t ->
   Reader.t ->

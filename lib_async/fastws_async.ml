@@ -238,7 +238,7 @@ let mk_r3 ?monitor of_frame st r2 w2 =
   let transferf q =
     let ret = Queue.create () in
     try_with ~extract_exn:true (fun () ->
-        Deferred.Queue.iter q ~f:(reassemble_and_process ret))
+        Deferred.Queue.iter q ~how:`Sequential ~f:(reassemble_and_process ret))
     >>= function
     | Ok () -> return ret
     | Error (Closing fr) ->

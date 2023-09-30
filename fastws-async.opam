@@ -13,8 +13,8 @@ depends: [
   "base64" {>= "3.2.0"}
   "uri-sexp" {>= "3.1.0"}
   "fastws"
-  "core" {>= "v0.15.0"}
-  "async" {>= "v0.15.0"}
+  "core" {>= "v0.16.1"}
+  "async" {>= "v0.16.0"}
   "logs-async" {>= "1.1"}
   "faraday-async" {>= "0.8.1"}
   "async-uri" {>= "0.2"}
