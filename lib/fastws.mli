@@ -67,8 +67,13 @@ module Opcode : sig
 end
 
 module Header : sig
-  type t =
-    {opcode: Opcode.t; rsv: int; final: bool; length: int; mask: string option}
+  type t = {
+    opcode : Opcode.t;
+    rsv : int;
+    final : bool;
+    length : int;
+    mask : string option;
+  }
   [@@deriving sexp]
 
   val compare : t -> t -> int
@@ -81,14 +86,14 @@ module Header : sig
 
   val xormask : mask:string -> Bigstringaf.t -> unit
 
-  type parse_result = [`Need of int | `Ok of t * int]
+  type parse_result = [ `Need of int | `Ok of t * int ]
 
   val parse : ?pos:int -> ?len:int -> Bigstringaf.t -> parse_result
   val serialize : Faraday.t -> t -> unit
 end
 
 module Frame : sig
-  type t = {header: Header.t; payload: Bigstringaf.t}
+  type t = { header : Header.t; payload : Bigstringaf.t }
 
   val compare : t -> t -> int
   val equal : t -> t -> bool

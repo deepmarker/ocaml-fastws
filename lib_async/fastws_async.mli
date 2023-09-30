@@ -8,7 +8,7 @@ open Async
 open Fastws
 open Httpaf
 
-type ('r, 'w) t = {r: 'r Pipe.Reader.t; w: 'w Pipe.Writer.t}
+type ('r, 'w) t = { r : 'r Pipe.Reader.t; w : 'w Pipe.Writer.t }
 
 val connect :
   ?on_pong:(Time_ns.Span.t option -> unit) ->

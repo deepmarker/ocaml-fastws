@@ -8,7 +8,8 @@ open Async
 open Httpaf
 open Fastws
 
-type t = {header: Header.t; payload: Bigstring.t option} [@@deriving sexp_of]
+type t = { header : Header.t; payload : Bigstring.t option }
+[@@deriving sexp_of]
 
 type err =
   [ `Connection_error of Client_connection.error

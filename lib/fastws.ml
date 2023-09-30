@@ -32,32 +32,44 @@ let string_of_exts exts =
   let len = List.length exts in
   List.iteri
     (fun i (k, v) ->
-      Buffer.add_string buf k ;
-      Option.iter (fun x -> Buffer.add_char buf '=' ; Buffer.add_string buf x) v ;
-      if i < pred len then (Buffer.add_char buf ';' ; Buffer.add_char buf ' ')
-      )
-    exts ;
+      Buffer.add_string buf k;
+      Option.iter
+        (fun x ->
+          Buffer.add_char buf '=';
+          Buffer.add_string buf x)
+        v;
+      if i < pred len then (
+        Buffer.add_char buf ';';
+        Buffer.add_char buf ' '))
+    exts;
   Buffer.contents buf
 
 let extension_parser s =
   let parse_one s =
     match String.(split_on_char '=' (trim s)) with
-    | [a] -> (a, None)
-    | [a; b] -> (a, Some b)
-    | _ -> invalid_arg "parse_one" in
+    | [ a ] -> (a, None)
+    | [ a; b ] -> (a, Some b)
+    | _ -> invalid_arg "parse_one"
+  in
   match String.split_on_char ';' s with [] -> [] | xs -> List.map parse_one xs
 
 let headers ?extensions ?protocols nonce =
   let open Httpaf in
   let h =
     Headers.of_list
-      [ ("Upgrade", "websocket"); ("Connection", "Upgrade");
-        ("Sec-WebSocket-Key", nonce); ("Sec-WebSocket-Version", "13") ] in
+      [
+        ("Upgrade", "websocket");
+        ("Connection", "Upgrade");
+        ("Sec-WebSocket-Key", nonce);
+        ("Sec-WebSocket-Version", "13");
+      ]
+  in
   let h =
     Option.fold protocols ~none:h ~some:(fun ps ->
-        Headers.add h "Sec-WebSocket-Protocol" (String.concat ", " ps) ) in
+        Headers.add h "Sec-WebSocket-Protocol" (String.concat ", " ps))
+  in
   Option.fold extensions ~none:h ~some:(fun exts ->
-      Headers.add h "Sec-WebSocket-Extensions" (string_of_exts exts) )
+      Headers.add h "Sec-WebSocket-Extensions" (string_of_exts exts))
 
 module Status = struct
   type t =
@@ -104,7 +116,7 @@ module Status = struct
 
   let to_bytes t =
     let buf = Bigstringaf.create 2 in
-    Bigstringaf.set_int16_be buf 0 (to_int t) ;
+    Bigstringaf.set_int16_be buf 0 (to_int t);
     buf
 
   let blit buf i t = Bigstringaf.set_int16_be buf i (to_int t)
@@ -158,8 +170,13 @@ module Opcode = struct
 end
 
 module Header = struct
-  type t =
-    {opcode: Opcode.t; rsv: int; final: bool; length: int; mask: string option}
+  type t = {
+    opcode : Opcode.t;
+    rsv : int;
+    final : bool;
+    length : int;
+    mask : string option;
+  }
   [@@deriving sexp]
 
   let compare = Stdlib.compare
@@ -168,7 +185,7 @@ module Header = struct
   let show t = Format.asprintf "%a" pp t
 
   let create ?(rsv = 0) ?(final = true) ?(length = 0) ?mask opcode =
-    {opcode; rsv; final; length; mask}
+    { opcode; rsv; final; length; mask }
 
   let xormask ~mask buf =
     let open Bigstringaf in
@@ -177,7 +194,7 @@ module Header = struct
       set buf i (xor_char (get buf i) mask.[i mod 4])
     done
 
-  type parse_result = [`Need of int | `Ok of t * int]
+  type parse_result = [ `Need of int | `Ok of t * int ]
 
   let parse_aux buf pos len =
     let get_finmask c = Char.code c land 0x80 <> 0 in
@@ -228,35 +245,35 @@ module Header = struct
       match len with Some len -> len | None -> Bigstringaf.length buf - pos
     in
     if pos < 0 || len < 2 || pos + len > Bigstringaf.length buf then
-      invalid_arg (Printf.sprintf "parse: pos = %d, len = %d" pos len) ;
+      invalid_arg (Printf.sprintf "parse: pos = %d, len = %d" pos len);
     parse_aux buf pos len
 
-  let serialize t {opcode; rsv; final; length; mask} =
+  let serialize t { opcode; rsv; final; length; mask } =
     let open Faraday in
     let b1 = Opcode.to_int opcode lor (rsv lsl 4) in
-    write_uint8 t (if final then 0x80 lor b1 else b1) ;
+    write_uint8 t (if final then 0x80 lor b1 else b1);
     let len =
       if length < 126 then length else if length < 1 lsl 16 then 126 else 127
     in
-    write_uint8 t (match mask with None -> len | Some _ -> 0x80 lor len) ;
+    write_uint8 t (match mask with None -> len | Some _ -> 0x80 lor len);
     if len = 126 then BE.write_uint16 t length
-    else if len = 127 then BE.write_uint64 t (Int64.of_int length) ;
+    else if len = 127 then BE.write_uint64 t (Int64.of_int length);
     match mask with None -> () | Some mask -> write_string t mask
 end
 
 module Frame = struct
-  type t = {header: Header.t; payload: Bigstringaf.t}
+  type t = { header : Header.t; payload : Bigstringaf.t }
 
   let create ?rsv ?final ?mask ?(payload = Bigstringaf.create 0) opcode =
     let length = Bigstringaf.length payload in
     let header = Header.create ?rsv ?final ?mask ~length opcode in
-    {header; payload}
+    { header; payload }
 
   let compare = Stdlib.compare
   let equal = Stdlib.( = )
 
   let pp ppf = function
-    | {header= {opcode= Text; _} as header; payload} ->
+    | { header = { opcode = Text; _ } as header; payload } ->
         let len = Bigstringaf.length payload in
         if len < 1024 then
           Format.fprintf ppf "%a <%s>" Sexplib.Sexp.pp (Header.sexp_of_t header)
@@ -266,16 +283,21 @@ module Frame = struct
             (Header.sexp_of_t header)
             Bigstringaf.(
               substring payload ~off:0 ~len:(min 1024 (length payload)))
-    | {header; _} ->
+    | { header; _ } ->
         Format.fprintf ppf "%a <binary data>" Sexplib.Sexp.pp
           (Header.sexp_of_t header)
 
   let is_binary = function
-    | {header= {opcode= Binary; _}; _} -> true
+    | { header = { opcode = Binary; _ }; _ } -> true
     | _ -> false
 
-  let is_text = function {header= {opcode= Text; _}; _} -> true | _ -> false
-  let is_close = function {header= {opcode= Close; _}; _} -> true | _ -> false
+  let is_text = function
+    | { header = { opcode = Text; _ }; _ } -> true
+    | _ -> false
+
+  let is_close = function
+    | { header = { opcode = Close; _ }; _ } -> true
+    | _ -> false
 
   module String = struct
     let kcreate opcode payload =
@@ -294,7 +316,7 @@ module Frame = struct
     let tobig f str =
       f
         (let len = String.length str in
-         Bigstringaf.of_string str ~off:0 ~len )
+         Bigstringaf.of_string str ~off:0 ~len)
 
     let createf opcode fmt =
       Format.kasprintf (tobig (fun payload -> create ~payload opcode)) fmt
@@ -307,9 +329,9 @@ module Frame = struct
     let kclose status msg =
       let msglen = String.length msg in
       let payload = Bigstringaf.create (2 + msglen) in
-      Bigstringaf.set_int16_be payload 0 (Status.to_int status) ;
-      Bigstringaf.blit_from_string msg ~src_off:0 payload ~dst_off:2 ~len:msglen ;
-      {header= Header.create ~length:(2 + msglen) Close; payload}
+      Bigstringaf.set_int16_be payload 0 (Status.to_int status);
+      Bigstringaf.blit_from_string msg ~src_off:0 payload ~dst_off:2 ~len:msglen;
+      { header = Header.create ~length:(2 + msglen) Close; payload }
 
     let close ?status () =
       match status with
@@ -320,7 +342,8 @@ module Frame = struct
       | Some (st, Some payload) ->
           let len = String.length payload in
           let payload = Bigstringaf.of_string ~off:0 ~len payload in
-          Status.blit payload 0 st ; create ~payload Close
+          Status.blit payload 0 st;
+          create ~payload Close
 
     let closef ?(status = Status.NormalClosure) fmt =
       Format.kasprintf (kclose status) fmt
@@ -337,7 +360,8 @@ module Frame = struct
           let payload = Status.to_bytes st in
           create ~payload Close
       | Some (st, Some payload) ->
-          Status.blit payload 0 st ; create ~payload Close
+          Status.blit payload 0 st;
+          create ~payload Close
   end
 end
 
