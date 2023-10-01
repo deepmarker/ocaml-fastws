@@ -22,11 +22,11 @@ let uri = Uri.make ~scheme:"https" ~host:"ftx.com" ~path:"ws/" ()
 let rec inner = function
   | 0 -> Deferred.unit
   | n when n > 0 ->
-      Fastws_async.with_connection ~of_string:Fn.id ~to_string:Fn.id uri
-        (fun _r _w -> Logs_async.app (fun m -> m "inner %d" n))
-      >>= fun _ ->
-      Clock_ns.after (Time_ns.Span.of_int_sec 3) >>= fun () -> inner (pred n)
+    Fastws_async.with_connection ~of_string:Fn.id ~to_string:Fn.id uri (fun _r _w ->
+      Logs_async.app (fun m -> m "inner %d" n))
+    >>= fun _ -> Clock_ns.after (Time_ns.Span.of_int_sec 3) >>= fun () -> inner (pred n)
   | _ -> invalid_arg "inner"
+;;
 
 (* This does not leak. *)
 (* let rec inner = function
@@ -43,13 +43,15 @@ let rec inner = function
  *       inner (pred n) *)
 
 let cmd =
-  Command.async ~summary:"Leak test"
+  Command.async
+    ~summary:"Leak test"
     (let open Command.Let_syntax in
-    [%map_open
-      let () = Logs_async_reporter.set_level_via_param []
-      and n = anon ("n" %: int) in
-      fun () ->
-        Logs.set_reporter (Logs_async_reporter.reporter ()) ;
-        inner n])
+     [%map_open
+       let () = Logs_async_reporter.set_level_via_param []
+       and n = anon ("n" %: int) in
+       fun () ->
+         Logs.set_reporter (Logs_async_reporter.reporter ());
+         inner n])
+;;
 
 let () = Command.run cmd

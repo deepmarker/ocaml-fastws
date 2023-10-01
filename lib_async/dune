@@ -3,6 +3,7 @@
  (public_name fastws-async)
  (preprocess (pps ppx_jane))
  (libraries
+   camlzip
    digestif.c
    base64
    uri-sexp
@@ -11,5 +12,4 @@
    async
    logs-async
    faraday-async
-   async-uri
-   zlib))
+   async-uri))
