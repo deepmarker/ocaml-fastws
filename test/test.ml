@@ -38,11 +38,11 @@ let roundtrip ?mask descr frames () =
   let pp = Faraday.create 256 in
   List.iter
     (fun { Frame.header; payload } ->
-      Format.eprintf "Free bytes_in_buffer %d@." (Faraday.free_bytes_in_buffer pp);
-      Header.serialize pp { header with mask };
-      match String.length payload with
-      | 0 -> ()
-      | _ -> Faraday.write_string pp payload)
+       Format.eprintf "Free bytes_in_buffer %d@." (Faraday.free_bytes_in_buffer pp);
+       Header.serialize pp { header with mask };
+       match String.length payload with
+       | 0 -> ()
+       | _ -> Faraday.write_string pp payload)
     frames;
   let buf = Faraday.serialize_to_bigstring pp in
   let len = Bigstringaf.length buf in
@@ -94,6 +94,45 @@ let roundtrip_masked_multi =
     multiframes
 ;;
 
+let close_payload code reason =
+  let payload = Bytes.create (2 + String.length reason) in
+  Bytes.set_int16_be payload 0 code;
+  Bytes.blit_string reason 0 payload 2 (String.length reason);
+  Bytes.unsafe_to_string payload
+;;
+
+let check_close expected_code expected_reason payload =
+  match Close_frame.of_payload payload with
+  | Error error -> failf "unexpected close error: %a" Close_frame.pp_error error
+  | Ok { code; reason } ->
+    check (option int) "code" expected_code code;
+    check string "reason" expected_reason reason
+;;
+
+let close_frames =
+  [ test_case "empty" `Quick (fun () -> check_close None "" "")
+  ; test_case "standard code and reason" `Quick (fun () ->
+      check_close (Some 1000) "done" (close_payload 1000 "done"))
+  ; test_case "private code is preserved" `Quick (fun () ->
+      check_close
+        (Some 4009)
+        "subscription limit"
+        (close_payload 4009 "subscription limit"))
+  ; test_case "one-byte payload is invalid" `Quick (fun () ->
+      match Close_frame.of_payload "\001" with
+      | Error Close_frame.Payload_length_one -> ()
+      | _ -> fail "expected one-byte payload error")
+  ; test_case "reserved wire code is invalid" `Quick (fun () ->
+      match Close_frame.of_payload (close_payload 1005 "") with
+      | Error (Close_frame.Invalid_code 1005) -> ()
+      | _ -> fail "expected invalid close code")
+  ; test_case "reason must be UTF-8" `Quick (fun () ->
+      match Close_frame.of_payload (close_payload 1000 "\255") with
+      | Error Close_frame.Invalid_utf8_reason -> ()
+      | _ -> fail "expected invalid UTF-8 reason")
+  ]
+;;
+
 let () =
   run
     "fastws"
@@ -101,5 +140,6 @@ let () =
     ; "roundtrip_masked", roundtrip_masked
     ; "roundtrip_multi", roundtrip_unmasked_multi
     ; "roundtrip_masked_multi", roundtrip_masked_multi
+    ; "close frames", close_frames
     ]
 ;;

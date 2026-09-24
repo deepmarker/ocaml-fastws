@@ -1,4 +1,4 @@
-(lang dune 3.10)
+(lang dune 3.17)
 
 (name fastws)
 
@@ -19,48 +19,44 @@
  (name fastws)
  (synopsis "Fast websocket library")
  (depends
-   ocaml
-   dune
-  (sexplib (>= v0.16))
-  (ppx_sexp_conv (>= v0.16))
-  (faraday (>= 0.8.2))
-  (httpaf (>= 0.7.1))
-  (alcotest (and :with-test (>= 1.7.0)))
- )
+  ocaml
+  sexplib
+  ppx_sexp_conv
+  faraday
+  httpun-types
+  uutf
+  (alcotest :with-test))
  (tags
   (websocket async)))
 
 (package
  (name fastws-async)
- (synopsis "Fast websocket library - Async code")
+ (synopsis "Fast websocket library - Async client and server")
  (depends
-   ocaml
-   dune
-  (camlzip (>= 1.11))
-  (digestif (>= 1.1.4))
-  (uri-sexp (>= 4.4.0))
-  (core (>= v0.16))
-  (async (>= v0.16))
-   logs-async
-  (faraday-async (>= 0.8.2))
-  (fastws (= :version))
-  (alcotest (and :with-test (>= 1.7.0)))
-  (alcotest-async (and :with-test (>= 1.7.0)))
- )
- (tags
-  (websocket async)))
+  ocaml
+  (fastws
+   (= :version))
+  httpun
+  digestif
+  camlzip
+  uri-sexp
+  core
+  async
+  logs-async
+  faraday-async
+  async-uri
+  ppx_jane
+  ppx_trace
+  (alcotest :with-test)
+  (alcotest-async :with-test)
+  (logs-async-reporter :with-test)))
 
 (package
  (name fastws-async-bin)
  (synopsis "Fastws utilities")
  (depends
-   ocaml
-   dune
-  (core_unix (>= 0.16))
-   logs-async-reporter
-  (fastws-async (= :version))
- )
- (tags
-  (websocket async)))
-
-; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project
+  ocaml
+  core_unix
+  logs-async-reporter
+  (fastws-async
+   (= :version))))

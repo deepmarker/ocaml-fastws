@@ -1,9 +1,22 @@
 (executables
  (names leak wscat wstest)
+ (modules leak wscat wstest)
  (public_names leak-test wscat wstest)
- (preprocess (pps ppx_jane))
+ (preprocess
+  (pps ppx_jane))
  (package fastws-async-bin)
- (libraries
-   core_unix.command_unix
-   logs-async-reporter
-   fastws-async))
+ (libraries core_unix.command_unix logs-async-reporter fastws-async))
+
+(executable
+ (name bench_permessage_deflate)
+ (modules bench_permessage_deflate)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core core_unix.command_unix fastws-async))
+
+(executable
+ (name wsecho)
+ (modules wsecho)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core core_unix.command_unix async fastws fastws-async))

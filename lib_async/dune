@@ -1,15 +1,21 @@
 (library
  (name fastws_async)
  (public_name fastws-async)
- (preprocess (pps ppx_jane))
+ (preprocess
+  (pps ppx_jane ppx_trace))
+ (foreign_stubs
+  (language c)
+  (names zlib_reset_stubs))
  (libraries
-   camlzip
-   digestif.c
-   base64
-   uri-sexp
-   fastws
-   core
-   async
-   logs-async
-   faraday-async
-   async-uri))
+  httpun
+  digestif.c
+  base64
+  uri-sexp
+  fastws
+  core
+  async
+  logs-async
+  faraday-async
+  async-uri
+  ppx_trace
+  camlzip))

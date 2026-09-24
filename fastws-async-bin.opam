@@ -4,14 +4,13 @@ synopsis: "Fastws utilities"
 maintainer: ["Vincent Bernardoff <vb@luminar.eu.org>"]
 authors: ["Vincent Bernardoff <vb@luminar.eu.org>"]
 license: "ISC"
-tags: ["websocket" "async"]
 homepage: "https://github.com/deepmarker/ocaml-fastws"
 doc: "https://deepmarker.github.io/fastws"
 bug-reports: "https://github.com/deepmarker/ocaml-fastws/issues"
 depends: [
+  "dune" {>= "3.17"}
   "ocaml"
-  "dune" {>= "3.10"}
-  "core_unix" {>= "0.16"}
+  "core_unix"
   "logs-async-reporter"
   "fastws-async" {= version}
   "odoc" {with-doc}

@@ -1,20 +1,63 @@
 (test
- (name       test)
- (modules    test)
- (preprocess (pps ppx_sexp_conv))
- (package    fastws)
- (libraries
-   fastws
-   alcotest))
+ (name test)
+ (modules test)
+ (preprocess
+  (pps ppx_sexp_conv))
+ (package fastws)
+ (libraries fastws alcotest))
 
 (test
- (name       test_async)
- (modules    test_async)
- (preprocess (pps ppx_jane))
- (package    fastws-async)
+ (name test_reassemble)
+ (modules test_reassemble)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core fastws fastws-async alcotest))
+
+(test
+ (name test_permessage_deflate)
+ (modules test_permessage_deflate)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core fastws-async alcotest))
+
+(test
+ (name test_timeout)
+ (modules test_timeout)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core async fastws-async))
+
+(executable
+ (name test_async)
+ (modules test_async)
+ (preprocess
+  (pps ppx_jane))
  (libraries
-   core
-   async
-   fastws-async
-   alcotest
-   alcotest-async))
+  core
+  async
+  fastws-async
+  alcotest
+  alcotest-async
+  logs-async-reporter))
+
+; Requires internet access (connects to echo.websocket.org); not attached
+; to runtest. Run with: dune build @integration (from this directory)
+
+(rule
+ (alias integration)
+ (action
+  (run %{exe:test_async.exe})))
+
+(test
+ (name test_liveness)
+ (modules test_liveness)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core async faraday httpun fastws fastws-async))
+
+(test
+ (name test_server)
+ (modules test_server)
+ (preprocess
+  (pps ppx_jane))
+ (libraries core async fastws fastws-async alcotest alcotest-async))

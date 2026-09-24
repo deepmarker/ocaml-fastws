@@ -1,46 +1,29 @@
 (*---------------------------------------------------------------------------
-  Copyright (c) 2020 DeepMarker. All rights reserved.
-  Distributed under the ISC license, see terms at the end of the file.
+   Copyright (c) 2020 DeepMarker. All rights reserved.
+   Distributed under the ISC license, see terms at the end of the file.
   ---------------------------------------------------------------------------*)
 
-open Httpaf
 open Core
 open Async
+open Httpun
 open Fastws
 
-let src = Logs.Src.create "fastws.async.raw"
-
-module Log = (val Logs.src_log src : Logs.LOG)
-module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
-
-type t =
-  { header : Header.t
-  ; payload : string option
-  }
-[@@deriving sexp_of]
-
 type err =
-  [ `Connection_error of (Client_connection.error[@sexp.opaque])
-  | `Invalid_response of (Response.t[@sexp.opaque])
+  [ `Connection_error of Client_connection.error
+  | `Invalid_response of Response.t
   | `Timeout
   ]
-[@@deriving sexp_of]
 
-let to_error x = Error.create_s (sexp_of_err x)
-let to_or_error = Deferred.Result.map_error ~f:(fun x -> Error.create_s (sexp_of_err x))
-let is_header { payload; _ } = Option.is_none payload
-
-let write_frame_if_open w { Frame.header; payload } =
-  Pipe.write_if_open w { header; payload = Some payload }
-;;
+let to_error _x = Error.createf "xxx"
+let to_or_error = Deferred.Result.map_error ~f:(fun _x -> Error.createf "xxx")
 
 let merge_headers h1 h2 =
   Headers.fold ~init:h2 ~f:(fun k v a -> Headers.add_unless_exists a k v) h1
 ;;
 
-let response_handler w iv nonce crypto r _body =
+let response_handler src w iv nonce crypto r _body =
   let module Crypto = (val crypto : CRYPTO) in
-  Log.debug (fun m -> m "%a" Response.pp_hum r);
+  Logs.debug ~src (fun m -> m "%a" Response.pp_hum r);
   let upgrade_hdr = Option.map ~f:String.lowercase (Headers.get r.headers "upgrade") in
   let sec_ws_accept_hdr = Headers.get r.headers "sec-websocket-accept" in
   let expected_sec =
@@ -52,208 +35,213 @@ let response_handler w iv nonce crypto r _body =
     when String.equal v expected_sec -> Ivar.fill_if_empty iv (Ok r)
   | _ ->
     don't_wait_for (Writer.close w);
-    Log.err (fun m -> m "Invalid response %a" Response.pp_hum r);
+    Logs.err ~src (fun m -> m "Invalid response %a" Response.pp_hum r);
     Ivar.fill_if_empty iv (Error (`Invalid_response r))
 ;;
 
-let write_iovecs w iovecs =
+let write_iovecs src w iovecs =
   let nbWritten =
     List.fold_left iovecs ~init:0 ~f:(fun a ({ IOVec.len; _ } as iovec) ->
-      Writer.schedule_iovec w (Obj.magic iovec);
+      (try Writer.schedule_iovec w (Obj.magic iovec) with
+       | exn -> Logs.err ~src (fun m -> m "%a" Exn.pp exn));
       a + len)
   in
   `Ok nbWritten
 ;;
 
-let rec flush_req conn w =
+let rec flush_req src conn w =
   match Client_connection.next_write_operation conn with
   | `Write iovecs ->
-    Client_connection.report_write_result conn (write_iovecs w iovecs);
-    flush_req conn w
-  | `Yield -> Client_connection.yield_writer conn (fun () -> flush_req conn w)
+    Client_connection.report_write_result conn (write_iovecs src w iovecs);
+    flush_req src conn w
+  | `Yield -> Client_connection.yield_writer conn (fun () -> flush_req src conn w)
   | `Close _ -> ()
 ;;
 
 let rec read_response conn r =
   match Client_connection.next_read_operation conn with
-  | `Close -> Deferred.unit
+  | `Yield | `Close -> Deferred.unit
   | `Read ->
     Reader.read_one_chunk_at_a_time r ~handle_chunk:(fun buf ~pos ~len ->
       let nb_read = Client_connection.read conn buf ~off:pos ~len in
       return (`Stop_consumed ((), nb_read)))
     >>= (function
-    | `Eof ->
-      let buf = Bigstringaf.empty in
-      ignore (Client_connection.read_eof conn buf ~off:0 ~len:0);
-      Deferred.unit
-    | `Eof_with_unconsumed_data buf ->
-      let len = String.length buf in
-      let buf = Bigstringaf.of_string ~off:0 ~len buf in
-      ignore (Client_connection.read_eof conn buf ~off:0 ~len);
-      Deferred.unit
-    | `Stopped () -> read_response conn r)
+     | `Eof ->
+       let buf = Bigstringaf.empty in
+       ignore (Client_connection.read_eof conn buf ~off:0 ~len:0);
+       Deferred.unit
+     | `Eof_with_unconsumed_data buf ->
+       let len = String.length buf in
+       let buf = Bigstringaf.of_string ~off:0 ~len buf in
+       ignore (Client_connection.read_eof conn buf ~off:0 ~len);
+       Deferred.unit
+     | `Stopped () -> read_response conn r)
 ;;
 
-let serialize stream w =
+let serialize src stream w =
   Faraday_async.serialize
     stream
     ~yield:(fun _ -> Scheduler.yield ())
-    ~writev:(fun iov -> return (write_iovecs w iov))
+    ~writev:(fun iov -> return (write_iovecs src w iov))
 ;;
 
-let read_payload (header : Header.t) w mask buf =
-  (* We are mutating the string, but the string will not be read after! *)
-  let buf = Bytes.unsafe_of_string_promise_no_mutation buf in
-  let serializer = Faraday.create (Bytes.length buf + 6) in
-  Header.xormask ~mask buf;
-  Faraday.write_bytes serializer buf;
+let xor_char a b = Char.(unsafe_of_int (to_int a lxor to_int b))
+
+let xormask ~mask buf =
+  let open Bytes in
+  for i = 0 to length buf - 1 do
+    set buf i (xor_char (get buf i) mask.[i mod 4])
+  done
+;;
+
+let xormask_to_faraday ?mask buf t =
+  match mask with
+  | None -> Faraday.write_string t buf
+  | Some mask ->
+    String.iteri buf ~f:(fun i c -> Faraday.write_char t (xor_char c mask.[i mod 4]))
+;;
+
+let write_payload ?mask src w buf =
+  let serializer = Faraday.create (String.length buf + 6) in
+  xormask_to_faraday ?mask buf serializer;
   Faraday.close serializer;
-  Header.xormask ~mask buf;
-  serialize serializer w
+  serialize src serializer w
+;;
+
+let write_frame mask src w ({ Frame.header; payload } as frame) =
+  let serializer = Faraday.create 6 in
+  let h =
+    match mask with
+    (* A server never masks (RFC 6455, section 5.1), whatever the frame
+       carries: a frame built from one the client sent -- the pong answering
+       its ping -- still holds the client's masking key. *)
+    | false -> { header with mask = None }
+    | true ->
+      let mask = Crypto.(to_string (generate 4)) in
+      { header with mask = Some mask }
+  in
+  Logs.debug ~src (fun m -> m "-> %a" Frame.pp { frame with header = h });
+  Header.serialize serializer h;
+  Faraday.close serializer;
+  serialize src serializer w
   >>= fun () ->
-  don't_wait_for
-    (Writer.flushed w
-     >>= fun () ->
-     Log_async.debug (fun m ->
-       (* Only display sent data with Text opcode. *)
-       match header.opcode with
-       | Text -> m "-> %s" Bytes.(To_string.subo buf ~len:(Int.min 4096 (length buf)))
-       | _ -> Deferred.unit));
-  Deferred.unit
+  match payload with
+  | "" -> Deferred.unit
+  | payload -> write_payload ?mask:h.mask src w payload
 ;;
 
-let iterf w { header; payload } =
-  let read_header t =
-    let serializer = Faraday.create 6 in
-    let mask = Crypto.(to_string (generate 4)) in
-    let (h : Header.t) = { t with mask = Some mask } in
-    Header.serialize serializer h;
-    Faraday.close serializer;
-    serialize serializer w
-    >>= fun () ->
-    don't_wait_for
-      (Writer.flushed w >>= fun () -> Log_async.debug (fun m -> m "-> %a" Header.pp t));
-    return mask
-  in
-  read_header header
-  >>= fun mask ->
-  Option.value_map payload ~default:Deferred.unit ~f:(read_payload header w mask)
+module St = struct
+  type t =
+    { h : Header.t
+    ; payload : bytes
+    ; mutable pos : int
+    }
+
+  let create h =
+    let payload = Bytes.create h.Header.length in
+    { h; payload; pos = 0 }
+  ;;
+
+  let write w { h = header; payload; _ } =
+    Option.iter header.mask ~f:(fun mask -> xormask ~mask payload);
+    let payload = Bytes.unsafe_to_string ~no_mutation_while_string_reachable:payload in
+    Pipe.write_without_pushback_if_open w { Frame.header; payload }
+  ;;
+end
+
+module ChunkSt = struct
+  type t =
+    { mutable current_header : St.t option
+    ; mutable consumed : int
+    }
+end
+
+let%trace read_payload buf ~pos ~len ~(state : ChunkSt.t) ~w (st : St.t) =
+  let wanted_len = Bytes.length st.payload - st.pos in
+  let will_read = min (len - state.consumed) wanted_len in
+  Bigstring.To_bytes.blit
+    ~src:buf
+    ~src_pos:(pos + state.consumed)
+    ~dst:st.payload
+    ~dst_pos:st.pos
+    ~len:will_read;
+  st.pos <- st.pos + will_read;
+  state.consumed <- state.consumed + will_read;
+  let missing_len = wanted_len - will_read in
+  if missing_len > 0
+  then `Consumed (state.consumed, `Need missing_len)
+  else if Pipe.is_closed w
+  then `Stop ()
+  else (
+    St.write w st;
+    state.current_header <- None;
+    `Continue)
 ;;
 
-let mk_w2 ?monitor w =
-  Pipe.create_writer (fun r ->
-    don't_wait_for (Pipe.closed r >>= fun () -> Writer.close w);
-    let downstream_flushed () =
-      match Pipe.is_closed r with
-      | true -> return `Reader_closed (* Not sure if this is correct. *)
-      | false ->
-        Deferred.any_unit Writer.[ flushed w; close_finished w ] >>| fun () -> `Ok
-    in
-    let consumer = Pipe.add_consumer r ~downstream_flushed in
-    Deferred.any_unit
-      [ Writer.close_started w
-      ; Writer.close_finished w
-      ; (Monitor.detach_and_get_next_error (Writer.monitor w)
-         >>| fun exn -> Option.iter monitor ~f:(fun m -> Monitor.send_exn m exn))
-      ; Pipe.iter'
-          ~flushed:(Consumer consumer)
-          r
-          ~f:(Deferred.Queue.iter ~how:`Sequential ~f:(iterf w))
-        |> Deferred.ignore_m
-      ])
-;;
-
-type st =
-  { h : Header.t
-  ; payload : bytes
-  ; mutable pos : int
-  }
-
-let create_st h =
-  let payload = Bytes.create h.Header.length in
-  { h; payload; pos = 0 }
-;;
-
-let write_st w { h = header; payload; _ } =
-  let payload = Bytes.unsafe_to_string ~no_mutation_while_string_reachable:payload in
-  Pipe.write_without_pushback w { header; payload = Some payload }
-;;
-
-let handle_chunk w =
-  let current_header = ref None in
-  let consumed = ref 0 in
-  let rec read_payload buf ~pos ~len =
-    assert (Option.is_some !current_header);
-    let st = Option.value_exn !current_header in
-    let wanted_len = Bytes.length st.payload - st.pos in
-    let will_read = min (len - !consumed) wanted_len in
-    (* Data is copied here, could be into a string instead of bigstring. *)
-    Bigstring.To_bytes.blit
-      ~src:buf
-      ~src_pos:(pos + !consumed)
-      ~dst:st.payload
-      ~dst_pos:st.pos
-      ~len:will_read;
-    st.pos <- st.pos + will_read;
-    consumed := !consumed + will_read;
-    let missing_len = wanted_len - will_read in
-    if missing_len > 0
-    then (
-      assert (missing_len > len - !consumed);
-      return (`Consumed (!consumed, `Need missing_len)))
-    else (
-      match Pipe.is_closed w with
-      | true -> return (`Stop ())
-      | false ->
-        write_st w st;
-        current_header := None;
-        read_header buf ~pos ~len)
-  and read_header buf ~pos ~len =
-    assert (Option.is_none !current_header);
-    match len - !consumed with
-    | 0 -> return `Continue
-    | 1 -> return (`Consumed (!consumed, `Need 2))
-    | _ ->
-      (match Header.parse buf ~pos:(pos + !consumed) ~len:(len - !consumed) with
-       | `Need n -> return (`Consumed (!consumed, `Need n))
-       | `Ok (h, read) ->
-         consumed := !consumed + read;
-         if h.length = 0
-         then (
-           match Pipe.is_closed w with
-           | true -> return (`Stop ())
-           | false ->
-             Pipe.write_without_pushback w { header = h; payload = None };
-             read_header buf ~pos ~len)
+let%trace read_header _src buf ~pos ~len ~(state : ChunkSt.t) ~w =
+  match len - state.consumed with
+  | 0 -> `Continue
+  | 1 -> `Consumed (state.consumed, `Need 2)
+  | _ ->
+    (match Header.parse buf ~pos:(pos + state.consumed) ~len:(len - state.consumed) with
+     | `Need n -> `Consumed (state.consumed, `Need n)
+     | `Ok (h, read) ->
+       state.consumed <- state.consumed + read;
+       if h.length = 0
+       then
+         if Pipe.is_closed w
+         then `Stop ()
          else (
-           current_header := Some (create_st h);
-           read_payload buf ~pos ~len))
-  in
-  fun buf ~pos ~len ->
-    (* Log_async.debug (fun m -> m "handle_chunk") >>= fun () -> *)
-    consumed := 0;
-    (match !current_header with
-     | None -> read_header buf ~pos ~len
-     | Some _ -> read_payload buf ~pos ~len)
-    >>= fun ret -> Pipe.pushback w >>= fun () -> return ret
+           Pipe.write_without_pushback w { Frame.header = h; payload = "" };
+           `Continue)
+       else (
+         (* check header validity *)
+         (* Logs.debug ~src (fun m -> m "%a" Header.pp h) ; *)
+         let valid =
+           h.rsv land 3 = 0
+           && Opcode.is_std h.opcode
+           && h.length > 0
+           && h.length < 100 * 1024 * 1024
+         in
+         if not valid
+         then raise_s [%message "invalid header" ~hdr:(h : Header.t)]
+         else state.current_header <- Some (St.create h);
+         `Continue))
 ;;
 
-let mk_r2 r =
-  Pipe.create_reader ~close_on_exception:false (fun w ->
-    don't_wait_for (Pipe.closed w >>= fun () -> Reader.close r);
-    let handle_chunk = handle_chunk w in
-    Reader.read_one_chunk_at_a_time r ~handle_chunk |> Deferred.ignore_m)
+let%trace handle_chunk src w =
+  let state = { ChunkSt.current_header = None; consumed = 0 } in
+  fun buf ~pos ~len ->
+    let rec process_loop () =
+      if state.consumed >= len
+      then `Continue
+      else (
+        match state.current_header with
+        | None ->
+          (match read_header src buf ~pos ~len ~state ~w with
+           | `Continue -> process_loop ()
+           | other -> other)
+        | Some st ->
+          (match read_payload buf ~pos ~len ~state ~w st with
+           | `Continue -> process_loop ()
+           | other -> other))
+    in
+    state.consumed <- 0;
+    match process_loop () with
+    | exception _ -> return (`Stop ())
+    | result -> Pipe.pushback w >>= fun () -> return result
 ;;
 
 let initialize
-  ?monitor
-  ?timeout
-  ?(extra_headers = Headers.empty)
-  ?(extensions = [ "permessage-deflate", None ])
-  ?protocols
-  url
-  r
-  w
+      ?monitor
+      ?timeout
+      ?(extra_headers = Headers.empty)
+      ?(extensions = [ "permessage-deflate", None ])
+      ?protocols
+      src
+      url
+      r
+      w
   =
   let extensions =
     match extensions with
@@ -272,13 +260,21 @@ let initialize
   let ok = Ivar.create () in
   let error_handler e =
     don't_wait_for (Writer.close w);
-    Ivar.fill ok (Error (`Connection_error e))
+    Ivar.fill_exn ok (Error (`Connection_error e))
   in
-  let response_handler = response_handler w ok nonce (module Crypto) in
-  let _body, conn = Client_connection.request req ~error_handler ~response_handler in
-  flush_req conn w;
+  let response_handler = response_handler src w ok nonce (module Crypto) in
+  let conn = Client_connection.create () in
+  let _body =
+    Client_connection.request
+      ~flush_headers_immediately:true
+      conn
+      req
+      ~error_handler
+      ~response_handler
+  in
+  flush_req src conn w;
   don't_wait_for (Scheduler.within' ?monitor (fun () -> read_response conn r));
-  Log_async.debug (fun m -> m "%a" Request.pp_hum req)
+  Logs_async.debug ~src (fun m -> m "%a" Request.pp_hum req)
   >>= fun () ->
   let timeout =
     match timeout with
@@ -288,8 +284,105 @@ let initialize
   Deferred.any [ Ivar.read ok; timeout ]
 ;;
 
-let connect ?extra_headers ?extensions ?protocols ?timeout ?monitor url r w =
-  initialize ?timeout ?extra_headers ?extensions ?protocols url r w
+let mk_r2 src r w =
+  (* This should return when the connection is closed. But in
+     practice, it does not work well, i.e. the connection can be dead
+     and this does not return. *)
+  (* if w is closed, then [handle_chunk] will complete and [finally]
+     below will be triggered. *)
+  (* handle chunk does not raise, will return [Stop ()] on read
+     error. *)
+  let handle_chunk = handle_chunk src w in
+  Monitor.protect
+    ~finally:(fun () -> Reader.close r)
+    (fun () -> Reader.read_one_chunk_at_a_time r ~handle_chunk |> Deferred.ignore_m)
+;;
+
+let mk_w2 ?monitor mask src w r =
+  let downstream_flushed () =
+    match Pipe.is_closed r with
+    | true -> return `Reader_closed (* Not sure if this is correct. *)
+    | false -> Deferred.any_unit Writer.[ flushed w; close_finished w ] >>| fun () -> `Ok
+  in
+  let consumer = Pipe.add_consumer r ~downstream_flushed in
+  (* Will terminate if any of the following returns. *)
+  let on_msg q =
+    Deferred.Queue.iter q ~how:`Sequential ~f:(write_frame mask src w)
+    >>= fun () ->
+    (* flush writer *)
+    Writer.flushed_or_failed_with_result w
+    >>= function
+    | Flushed _ts -> Deferred.unit
+    | _ ->
+      (* The underlying writer failed to flush: the connection is dead.
+         Stop the write loop cleanly by closing the pipe reader, which lets
+         [Pipe.iter'] complete and triggers the [Writer.close w] finally.
+         Raising here would escape to the monitor in effect when
+         [Pipe.create_writer] was called (not [?monitor]) and take down the
+         whole process. *)
+      Pipe.close_read r;
+      Deferred.unit
+  in
+  (* Writer guaranteed to be closed after this. *)
+  Monitor.protect
+    ~finally:(fun () -> Writer.close w)
+    (fun () ->
+       Deferred.any_unit
+         [ Writer.close_started w
+         ; Writer.close_finished w
+         ; Writer.stopped_permanently w
+         ; (Monitor.detach_and_get_next_error (Writer.monitor w)
+            >>| fun exn -> Option.iter monitor ~f:(fun m -> Monitor.send_exn m exn))
+         ; Pipe.iter' ~continue_on_error:false ~flushed:(Consumer consumer) r ~f:on_msg
+         ])
+;;
+
+let parse_extension_value s =
+  (* Parse: extension-name [; param=value]* *)
+  match String.lsplit2 s ~on:';' with
+  | None -> String.strip s, []
+  | Some (name, params) ->
+    let parse_param p =
+      match String.lsplit2 (String.strip p) ~on:'=' with
+      | None -> String.strip p, None
+      | Some (k, v) -> String.strip k, Some (String.strip v)
+    in
+    let params = String.split params ~on:';' |> List.map ~f:parse_param in
+    String.strip name, params
+;;
+
+let get_extensions (headers : Headers.t) =
+  Headers.fold headers ~init:[] ~f:(fun k v acc ->
+    if String.Caseless.equal k "sec-websocket-extensions"
+    then (
+      (* Split by comma for multiple extensions in one header *)
+      let exts = String.split v ~on:',' |> List.map ~f:parse_extension_value in
+      exts @ acc)
+    else acc)
+;;
+
+let set_extensions exts =
+  match exts with
+  | [] -> Headers.empty
+  | _ ->
+    let format_param (k, v) =
+      match v with
+      | None -> k
+      | Some value -> k ^ "=" ^ value
+    in
+    let format_extension (name, params) =
+      match params with
+      | [] -> name
+      | _ ->
+        let params_str = String.concat ~sep:"; " (List.map params ~f:format_param) in
+        name ^ "; " ^ params_str
+    in
+    let value = String.concat ~sep:", " (List.map exts ~f:format_extension) in
+    Headers.of_list [ "sec-websocket-extensions", value ]
+;;
+
+let connect ?extra_headers ?extensions ?protocols ?timeout ?monitor src url r w =
+  initialize ?timeout ?extra_headers ?extensions ?protocols src url r w
   >>| function
   | Error _ as res ->
     (* Free resources! *)
@@ -297,27 +390,30 @@ let connect ?extra_headers ?extensions ?protocols ?timeout ?monitor url r w =
     don't_wait_for (Writer.close w);
     res
   | Ok resp ->
-    let exts =
-      Option.value_map
-        ~default:[]
-        ~f:extension_parser
-        (Headers.get resp.headers "sec-websocket-extensions")
-    in
-    Result.return (exts, mk_r2 r, mk_w2 ?monitor w)
+    let exts = get_extensions resp.headers in
+    Result.return
+      ( exts
+      , Pipe.create_reader ~close_on_exception:false (mk_r2 src r)
+      , Pipe.create_writer (mk_w2 ?monitor true src w) )
+;;
+
+let of_initialized ?monitor ?(mask = false) src r w =
+  ( Pipe.create_reader ~close_on_exception:false (mk_r2 src r)
+  , Pipe.create_writer (mk_w2 ?monitor mask src w) )
 ;;
 
 (*---------------------------------------------------------------------------
-  Copyright (c) 2020 DeepMarker
+   Copyright (c) 2020 DeepMarker
 
-  Permission to use, copy, modify, and/or distribute this software for any
-  purpose with or without fee is hereby granted, provided that the above
-  copyright notice and this permission notice appear in all copies.
+   Permission to use, copy, modify, and/or distribute this software for any
+   purpose with or without fee is hereby granted, provided that the above
+   copyright notice and this permission notice appear in all copies.
 
-  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   ---------------------------------------------------------------------------*)

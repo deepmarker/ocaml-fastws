@@ -1,15 +1,12 @@
 (*---------------------------------------------------------------------------
-  Copyright (c) 2020 DeepMarker. All rights reserved.
-  Distributed under the ISC license, see terms at the end of the file.
+   Copyright (c) 2020 DeepMarker. All rights reserved.
+   Distributed under the ISC license, see terms at the end of the file.
   ---------------------------------------------------------------------------*)
-
-open Httpaf
 
 module type CRYPTO = sig
   type buffer
-  type g
 
-  val generate : ?g:g -> int -> buffer
+  val generate : int -> buffer
   val of_string : string -> buffer
   val to_string : buffer -> string
 end
@@ -17,13 +14,12 @@ end
 module Crypto : CRYPTO with type buffer = string
 
 val websocket_uuid : string
-val extension_parser : string -> (string * string option) list
 
 val headers
   :  ?extensions:(string * string option) list
   -> ?protocols:string list
   -> string
-  -> Headers.t
+  -> Httpun_types.Headers.t
 
 module Status : sig
   type t =
@@ -36,6 +32,10 @@ module Status : sig
     | MessageTooBig
     | UnsupportedExtension
     | UnexpectedCondition
+    | ServiceRestart
+    | TryAgainLater
+    | BadGateway
+    | TLSHandshake
     | Unknown of int
 
   val is_unknown : t -> bool
@@ -74,14 +74,19 @@ module Header : sig
     ; length : int
     ; mask : string option
     }
-  [@@deriving sexp]
+  [@@deriving sexp_of]
 
+  val rsv1 : int
+  val rsv2 : int
+  val rsv3 : int
+  val has_rsv1 : t -> bool
+  val has_rsv2 : t -> bool
+  val has_rsv3 : t -> bool
   val compare : t -> t -> int
   val equal : t -> t -> bool
   val pp : Format.formatter -> t -> unit
   val show : t -> string
   val create : ?rsv:int -> ?final:bool -> ?length:int -> ?mask:string -> Opcode.t -> t
-  val xormask : mask:string -> bytes -> unit
 
   type parse_result =
     [ `Need of int
@@ -98,6 +103,7 @@ module Frame : sig
     ; payload : string
     }
 
+  val with_compressed_payload : t -> string -> t
   val compare : t -> t -> int
   val equal : t -> t -> bool
   val pp : Format.formatter -> t -> unit
@@ -110,6 +116,8 @@ module Frame : sig
     val empty_binary : t
     val text : string -> t
     val binary : string -> t
+    val ping : string -> t
+    val pong : string -> t
     val createf : Opcode.t -> ('a, Format.formatter, unit, t) format4 -> 'a
     val pingf : ('a, Format.formatter, unit, t) format4 -> 'a
     val pongf : ('a, Format.formatter, unit, t) format4 -> 'a
@@ -120,18 +128,36 @@ module Frame : sig
   end
 end
 
+module Close_frame : sig
+  type t =
+    { code : int option
+    ; reason : string
+    }
+  [@@deriving sexp]
+
+  type error =
+    | Payload_length_one
+    | Invalid_code of int
+    | Invalid_utf8_reason
+  [@@deriving sexp]
+
+  val of_payload : string -> (t, error) result
+  val pp : Format.formatter -> t -> unit
+  val pp_error : Format.formatter -> error -> unit
+end
+
 (*---------------------------------------------------------------------------
-  Copyright (c) 2020 DeepMarker
+   Copyright (c) 2020 DeepMarker
 
-  Permission to use, copy, modify, and/or distribute this software for any
-  purpose with or without fee is hereby granted, provided that the above
-  copyright notice and this permission notice appear in all copies.
+   Permission to use, copy, modify, and/or distribute this software for any
+   purpose with or without fee is hereby granted, provided that the above
+   copyright notice and this permission notice appear in all copies.
 
-  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   ---------------------------------------------------------------------------*)

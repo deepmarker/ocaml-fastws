@@ -1,5 +1,6 @@
 (library
  (name fastws)
  (public_name fastws)
- (preprocess (pps ppx_sexp_conv))
- (libraries sexplib faraday httpaf))
+ (preprocess
+  (pps ppx_sexp_conv))
+ (libraries sexplib faraday httpun-types uutf))

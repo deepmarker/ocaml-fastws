@@ -1,0 +1,24 @@
+Unreleased
+----------
+
+- Add a server side: `Fastws_async.Server.accept` answers a WebSocket upgrade
+  on a reader and writer (101 with the `Sec-WebSocket-Accept` proof, 426 for a
+  version other than 13, 400 for anything else, head bounded to 16 KiB and 100
+  lines) and returns the same connection `connect` gives a client;
+  `Server.serve` runs a handler per connection on a TCP listener. Subprotocols
+  are chosen by a callback; permessage-deflate is not offered. `bin/wsecho` is
+  an echo server built on it.
+- Never mask a frame written in server mode. A pong built from a client's ping
+  kept the ping's masking key and went out masked, which strict clients reject
+  with 1002 (RFC 6455 §5.1); this also affected the cryexc server.
+- Close timed-out connection attempts and contain late connection errors.
+- Reuse zlib streams for `permessage-deflate` connections that negotiate
+  `client_no_context_takeover` or `server_no_context_takeover`. This avoids
+  destroying and recreating native streams after every WebSocket message.
+- Add an offline decompression benchmark covering representative message sizes.
+- Fail the connection with 1002 on a frame carrying RSV1 when
+  `permessage-deflate` was not negotiated, and on RSV1 riding a control frame
+  (RFC 6455 §5.2, RFC 7692 §6.1). Such a frame used to reach the application
+  still compressed. Fixes Autobahn case 3.4.
+- Rework `bin/wstest` into a full Autobahn client driver: `getCaseCount`, then
+  `runCase` per index, then `updateReports`.

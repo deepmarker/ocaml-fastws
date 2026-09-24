@@ -9,13 +9,14 @@ homepage: "https://github.com/deepmarker/ocaml-fastws"
 doc: "https://deepmarker.github.io/fastws"
 bug-reports: "https://github.com/deepmarker/ocaml-fastws/issues"
 depends: [
+  "dune" {>= "3.17"}
   "ocaml"
-  "dune" {>= "3.10"}
-  "sexplib" {>= "v0.16"}
-  "ppx_sexp_conv" {>= "v0.16"}
-  "faraday" {>= "0.8.2"}
-  "httpaf" {>= "0.7.1"}
-  "alcotest" {with-test & >= "1.7.0"}
+  "sexplib"
+  "ppx_sexp_conv"
+  "faraday"
+  "httpun-types"
+  "uutf"
+  "alcotest" {with-test}
   "odoc" {with-doc}
 ]
 build: [
