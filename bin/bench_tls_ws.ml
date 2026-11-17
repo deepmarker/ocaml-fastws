@@ -13,11 +13,16 @@ open Async
 
 let msg = String.make 120 'x'
 
-let stream_to w ~burst =
+let stream_to w ~burst ~lifetime =
+  let stop = Option.map lifetime ~f:(fun ms -> Time_float.add (Time_float.now ()) (Time_float.Span.of_ms ms)) in
+  let expired () = Option.exists stop ~f:(fun t -> Time_float.(now () > t)) in
   let rec tick () =
-    match Pipe.is_closed w with
-    | true -> Deferred.unit
-    | false ->
+    match Pipe.is_closed w, expired () with
+    | true, _ -> Deferred.unit
+    | false, true ->
+      Pipe.close w;
+      Deferred.unit
+    | false, false ->
       for _ = 1 to burst do
         Pipe.write_without_pushback_if_open w msg
       done;
@@ -26,20 +31,20 @@ let stream_to w ~burst =
   tick ()
 ;;
 
-let on_conn ~burst _addr _conn r w =
+let on_conn ~burst ~lifetime _addr _conn r w =
   Fastws_async.Server.accept r w Fastws_async.of_frame_s Fastws_async.to_frame_s
   >>= function
   | Error _ -> Deferred.unit
-  | Ok (_request, { Fastws_async.w = out; _ }) -> stream_to out ~burst
+  | Ok (_request, { Fastws_async.w = out; _ }) -> stream_to out ~burst ~lifetime
 ;;
 
-let server ~dir ~port ~burst =
+let server ~dir ~port ~burst ~lifetime =
   Async_uri.listen_ssl
     ~crt_file:(dir ^/ "localhost.pem")
     ~key_file:(dir ^/ "localhost.key")
     ~on_handler_error:`Ignore
     (Tcp.Where_to_listen.of_port port)
-    (on_conn ~burst)
+    (on_conn ~burst ~lifetime)
   >>= fun _server -> Deferred.never ()
 ;;
 
@@ -107,13 +112,15 @@ let connect_one ~mode ~ca_file url =
 let open_one ~mode ~ca_file ~msgs url = connect_one ~mode ~ca_file url >>| start msgs
 
 (* Connect, read a few frames, hang up. *)
-let churn_once ~mode ~ca_file url =
+let churn_once ~server_closes ~mode ~ca_file url =
   connect_one ~mode ~ca_file url
   >>= function
   | Error _ -> failwith "websocket upgrade failed"
   | Ok { Fastws_async.r; w } ->
-    Pipe.read_exactly r ~num_values:5
-    >>= fun _ ->
+    (match server_closes with
+     | true -> Pipe.iter_without_pushback r ~f:ignore
+     | false -> Pipe.read_exactly r ~num_values:5 >>| ignore)
+    >>= fun () ->
     Pipe.close_read r;
     Pipe.close w;
     after (Time_float.Span.of_ms 5.)
@@ -121,9 +128,9 @@ let churn_once ~mode ~ca_file url =
 
 let open_fds () = Array.length (Stdlib.Sys.readdir "/proc/self/fd")
 
-let churn ~mode ~ca_file ~port ~rounds =
+let churn ~server_closes ~mode ~ca_file ~port ~rounds =
   let url = Uri.make ~scheme:"wss" ~host:"localhost" ~port () in
-  let run n = Deferred.List.init ~how:`Sequential n ~f:(fun _ -> churn_once ~mode ~ca_file url) in
+  let run n = Deferred.List.init ~how:`Sequential n ~f:(fun _ -> churn_once ~server_closes ~mode ~ca_file url) in
   let settle () = after (Time_float.Span.of_sec 1.) >>| fun () -> Gc.full_major () in
   run 50
   >>= fun _ ->
@@ -186,8 +193,9 @@ let () =
              ~summary:"stream frames"
              (let%map_open.Command dir = flag "-certs" (required string) ~doc:"DIR certs"
               and port = flag "-port" (required int) ~doc:"PORT listen"
-              and burst = flag "-burst" (optional_with_default 2 int) ~doc:"N frames per ms" in
-              fun () -> server ~dir ~port ~burst) )
+              and burst = flag "-burst" (optional_with_default 2 int) ~doc:"N frames per ms"
+              and lifetime = flag "-lifetime-ms" (optional float) ~doc:"MS hang up after" in
+              fun () -> server ~dir ~port ~burst ~lifetime) )
        ; ( "churn"
          , Command.async
              ~summary:"connect and hang up repeatedly, report what is left behind"
@@ -198,8 +206,11 @@ let () =
                   "-mode"
                   (required (Arg_type.of_alist_exn [ "pipe", `Pipe; "chunks", `Chunks ]))
                   ~doc:"pipe|chunks"
-              and rounds = flag "-rounds" (optional_with_default 500 int) ~doc:"N" in
-              fun () -> churn ~mode ~ca_file ~port ~rounds >>| fun () -> shutdown 0) )
+              and rounds = flag "-rounds" (optional_with_default 500 int) ~doc:"N"
+              and server_closes =
+                flag "-server-closes" no_arg ~doc:" wait for the server to hang up"
+              in
+              fun () -> churn ~server_closes ~mode ~ca_file ~port ~rounds >>| fun () -> shutdown 0) )
        ; ( "client"
          , Command.async
              ~summary:"measure"
