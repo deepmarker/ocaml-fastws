@@ -91,11 +91,26 @@ let start msgs = function
   | Error _ -> failwith "websocket upgrade failed"
 ;;
 
+let logged = ref false
+
+let log_tls_once (info : Async_uri.Chunked.tls_info) =
+  if not !logged
+  then (
+    logged := true;
+    printf "tls: %s %s ktls_recv=%b\n" info.version info.cipher info.ktls_recv)
+;;
+
 let connect_one ~mode ~ca_file url =
   match mode with
-  | `Chunks ->
-    Async_uri.Chunked.connect ~ca_file url
-    >>= fun { r; w; _ } ->
+  | (`Strings | `Direct) as mode ->
+    let engine =
+      match mode with
+      | `Strings -> `Async_ssl
+      | `Direct -> `Direct
+    in
+    Async_uri.Chunked.connect ~engine ~ca_file url
+    >>= fun { r; w; tls; _ } ->
+    Option.iter tls ~f:log_tls_once;
     Fastws_async.connect url r w Fastws_async.of_frame_s Fastws_async.to_frame_s
   | `Pipe ->
     (* What [connect] did before: a Reader fed by a Unix pipe. *)
@@ -147,7 +162,8 @@ let churn ~server_closes ~mode ~ca_file ~port ~rounds =
     "%-6s churn rounds=%d  live_words %+d  fds %+d  rss %+d kB\n"
     (match mode with
      | `Pipe -> "pipe"
-     | `Chunks -> "chunks")
+     | `Strings -> "strings"
+     | `Direct -> "direct")
     rounds
     ((Gc.stat ()).live_words - words)
     (open_fds () - fds)
@@ -172,7 +188,8 @@ let client ~mode ~ca_file ~port ~conns ~secs ~warm =
      reads/msg=%.3f  live_words %+d  rss %+d kB\n"
     (match mode with
      | `Pipe -> "pipe"
-     | `Chunks -> "chunks")
+     | `Strings -> "strings"
+     | `Direct -> "direct")
     conns
     (n /. secs)
     (100. *. (b.cpu -. a.cpu) /. secs)
@@ -204,8 +221,8 @@ let () =
               and mode =
                 flag
                   "-mode"
-                  (required (Arg_type.of_alist_exn [ "pipe", `Pipe; "chunks", `Chunks ]))
-                  ~doc:"pipe|chunks"
+                  (required (Arg_type.of_alist_exn [ "pipe", `Pipe; "strings", `Strings; "direct", `Direct ]))
+                  ~doc:"pipe|strings|direct"
               and rounds = flag "-rounds" (optional_with_default 500 int) ~doc:"N"
               and server_closes =
                 flag "-server-closes" no_arg ~doc:" wait for the server to hang up"
@@ -219,8 +236,8 @@ let () =
               and mode =
                 flag
                   "-mode"
-                  (required (Arg_type.of_alist_exn [ "pipe", `Pipe; "chunks", `Chunks ]))
-                  ~doc:"pipe|chunks"
+                  (required (Arg_type.of_alist_exn [ "pipe", `Pipe; "strings", `Strings; "direct", `Direct ]))
+                  ~doc:"pipe|strings|direct"
               and conns = flag "-conns" (optional_with_default 8 int) ~doc:"N connections"
               and secs = flag "-secs" (optional_with_default 10. float) ~doc:"S measured"
               and warm = flag "-warm" (optional_with_default 2. float) ~doc:"S warm-up" in
