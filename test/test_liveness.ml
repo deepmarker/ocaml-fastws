@@ -23,7 +23,7 @@ let with_peer ?hb ?max_idle f =
     Fastws_async.of_initialized
       ?hb
       ?max_idle
-      reader
+      (Async_uri.Chunk_reader.of_reader reader)
       writer
       (Httpun.Headers.of_list [])
       Fn.id

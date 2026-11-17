@@ -26,7 +26,7 @@ let endpoint url path query =
    report to read. *)
 let with_ws url f =
   let run () =
-    Async_uri.with_connection url (fun { r; w; _ } ->
+    Async_uri.Chunked.with_connection url (fun { r; w; _ } ->
       Fastws_async.with_connection ~src url r w Fn.id Fn.id f)
   in
   Monitor.try_with ~extract_exn:true run

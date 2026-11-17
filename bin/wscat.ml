@@ -19,9 +19,9 @@ let handle_messages r w =
 
 let main url =
   Random.self_init ();
-  Async_uri.with_connection url (fun { r; w; _ } ->
+  Async_uri.Chunked.with_connection url (fun { r; w; _ } ->
     don't_wait_for
-      (Reader.close_finished r >>= fun () -> Log.info (fun m -> m "Reader closed!"));
+      (Async_uri.Chunk_reader.close_finished r >>= fun () -> Log.info (fun m -> m "Reader closed!"));
     don't_wait_for
       (Writer.close_finished w >>= fun () -> Log.info (fun m -> m "Writer closed!"));
     with_connection url r w of_frame_s to_frame_s handle_messages)

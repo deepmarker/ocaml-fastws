@@ -62,7 +62,7 @@ let rec read_response conn r =
   match Client_connection.next_read_operation conn with
   | `Yield | `Close -> Deferred.unit
   | `Read ->
-    Reader.read_one_chunk_at_a_time r ~handle_chunk:(fun buf ~pos ~len ->
+    Async_uri.Chunk_reader.read_one_chunk_at_a_time r ~handle_chunk:(fun buf ~pos ~len ->
       let nb_read = Client_connection.read conn buf ~off:pos ~len in
       return (`Stop_consumed ((), nb_read)))
     >>= (function
@@ -294,8 +294,8 @@ let mk_r2 src r w =
      error. *)
   let handle_chunk = handle_chunk src w in
   Monitor.protect
-    ~finally:(fun () -> Reader.close r)
-    (fun () -> Reader.read_one_chunk_at_a_time r ~handle_chunk |> Deferred.ignore_m)
+    ~finally:(fun () -> Async_uri.Chunk_reader.close r)
+    (fun () -> Async_uri.Chunk_reader.read_one_chunk_at_a_time r ~handle_chunk |> Deferred.ignore_m)
 ;;
 
 let mk_w2 ?monitor mask src w r =
@@ -386,7 +386,7 @@ let connect ?extra_headers ?extensions ?protocols ?timeout ?monitor src url r w 
   >>| function
   | Error _ as res ->
     (* Free resources! *)
-    don't_wait_for (Reader.close r);
+    don't_wait_for (Async_uri.Chunk_reader.close r);
     don't_wait_for (Writer.close w);
     res
   | Ok resp ->

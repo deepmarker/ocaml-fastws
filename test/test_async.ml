@@ -24,7 +24,7 @@ let connect_f r w =
 let src = Logs.Src.create "fastws.async.raw"
 
 let connect () =
-  Async_uri.connect url
+  Async_uri.Chunked.connect url
   >>= fun { r; w; _ } ->
   connect ~src url r w Fn.id Fn.id
   >>= function
@@ -37,7 +37,7 @@ let to_frame msg = Frame.String.textf "%s" msg
 let msg = "msg"
 
 let connect_ez () =
-  Async_uri.with_connection url (fun { r; w; _ } ->
+  Async_uri.Chunked.with_connection url (fun { r; w; _ } ->
     Fastws_async.Raw.to_or_error (Fastws_async.connect url r w of_frame to_frame)
     >>=? fun { r; w; _ } ->
     Pipe.read r
@@ -58,7 +58,7 @@ let connect_ez () =
 ;;
 
 let with_connection_ez () =
-  Async_uri.with_connection url (fun { r; w; _ } ->
+  Async_uri.Chunked.with_connection url (fun { r; w; _ } ->
     Fastws_async.with_connection url r w of_frame to_frame (fun r w ->
       Pipe.read r
       >>= fun _hello ->
@@ -102,7 +102,7 @@ let close_callback () =
   let { r; w } =
     Fastws_async.of_initialized
       ~on_close:(Ivar.fill_if_empty received)
-      client_reader
+      (Async_uri.Chunk_reader.of_reader client_reader)
       client_writer
       Httpun.Headers.empty
       Fn.id

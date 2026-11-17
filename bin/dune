@@ -20,3 +20,18 @@
  (preprocess
   (pps ppx_jane))
  (libraries core core_unix.command_unix async fastws fastws-async))
+
+(executable
+ (name bench_tls_ws)
+ (modules bench_tls_ws)
+ (preprocess
+  (pps ppx_jane))
+ (libraries
+  core
+  core_unix
+  core_unix.command_unix
+  async
+  async_kernel
+  async-uri
+  fastws
+  fastws-async))

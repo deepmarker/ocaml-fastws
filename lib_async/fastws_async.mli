@@ -41,7 +41,7 @@ val of_initialized
   -> ?monitor:Monitor.t
   -> ?hb:Time_ns.Span.t
   -> ?max_idle:Time_ns.Span.t
-  -> Reader.t
+  -> Async_uri.Chunk_reader.t
   -> Writer.t
   -> Headers.t
   -> (Frame.t -> 'a)
@@ -59,7 +59,7 @@ val connect
   -> ?hb:Time_ns.Span.t
   -> ?max_idle:Time_ns.Span.t
   -> Uri.t
-  -> Reader.t
+  -> Async_uri.Chunk_reader.t
   -> Writer.t
   -> (Frame.t -> 'r)
   -> ('w -> Frame.t)
@@ -76,7 +76,7 @@ val with_connection
   -> ?hb:Time_ns.Span.t
   -> ?max_idle:Time_ns.Span.t
   -> Uri.t
-  -> Reader.t
+  -> Async_uri.Chunk_reader.t
   -> Writer.t
   -> (Frame.t -> 'r)
   -> ('w -> Frame.t)
@@ -94,7 +94,7 @@ val with_connection'
   -> ?hb:Time_ns.Span.t
   -> ?max_idle:Time_ns.Span.t
   -> Uri.t
-  -> Reader.t
+  -> Async_uri.Chunk_reader.t
   -> Writer.t
   -> (Frame.t -> 'r)
   -> ('w -> Frame.t)

@@ -25,7 +25,7 @@ val connect
   -> ?monitor:Monitor.t
   -> Logs.src
   -> Uri.t
-  -> Reader.t
+  -> Async_uri.Chunk_reader.t
   -> Writer.t
   -> ( (string * (string * string option) list) list
        * Frame.t Pipe.Reader.t
@@ -40,7 +40,7 @@ val of_initialized
   :  ?monitor:Monitor.t
   -> ?mask:bool
   -> Logs.src
-  -> Reader.t
+  -> Async_uri.Chunk_reader.t
   -> Writer.t
   -> Frame.t Pipe.Reader.t * Frame.t Pipe.Writer.t
 

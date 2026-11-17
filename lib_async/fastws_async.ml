@@ -615,7 +615,7 @@ module Server = struct
              ?monitor
              ?hb
              ?max_idle
-             r
+             (Async_uri.Chunk_reader.of_reader r)
              w
              Httpun.Headers.empty
              of_frame
@@ -768,7 +768,7 @@ let connect_or_result
       to_frame
       url
   =
-  Async_uri.connect url
+  Async_uri.Chunked.connect url
   >>= fun { r; w; _ } ->
   Monitor.try_with ~extract_exn:true (fun () ->
     connect
@@ -788,7 +788,7 @@ let connect_or_result
       to_frame)
   >>= function
   | Error exn ->
-    Deferred.all_unit [ Writer.close w; Reader.close r ] >>= fun () -> raise exn
+    Deferred.all_unit [ Writer.close w; Async_uri.Chunk_reader.close r ] >>= fun () -> raise exn
   | Ok x -> return x
 ;;
 
@@ -809,7 +809,7 @@ let connect_or_error
   =
   let f () =
     Monitor.try_with ~extract_exn:true (fun () ->
-      Async_uri.connect ?timeout url
+      Async_uri.Chunked.connect ?timeout url
       >>= fun { r; w; _ } ->
       Monitor.try_with ~extract_exn:true (fun () ->
         connect
@@ -830,7 +830,7 @@ let connect_or_error
       >>= function
       | Error exn ->
         (* On writing error, close both, because the connection is likely dead. *)
-        Deferred.all_unit [ Writer.close w; Reader.close r ] >>= fun () -> raise exn
+        Deferred.all_unit [ Writer.close w; Async_uri.Chunk_reader.close r ] >>= fun () -> raise exn
       | Ok x -> to_or_error (return x))
     >>= function
     | Error exn -> return (Or_error.of_exn exn)

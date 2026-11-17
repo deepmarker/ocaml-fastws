@@ -22,7 +22,7 @@ let url = Uri.make ~scheme:"https" ~host:"ftx.com" ~path:"ws/" ()
 let rec inner = function
   | 0 -> Deferred.unit
   | n when n > 0 ->
-    Async_uri.with_connection url (fun { r; w; _ } ->
+    Async_uri.Chunked.with_connection url (fun { r; w; _ } ->
       Fastws_async.with_connection
         url
         r
